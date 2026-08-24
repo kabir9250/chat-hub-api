@@ -421,7 +421,24 @@ export class RealtimeGateway
 
   private rejectConnection(client: Socket, message: string): void {
     this.logger.warn(`Connection rejected (${client.id}): ${message}`);
-    client.emit('connect_error', { message });
+    // PRODUCTION BUGFIX (found live on chat-hub-api-cuwc.onrender.com — this
+    // was crashing the ENTIRE process on every socket connection carrying an
+    // invalid/expired token, a crash loop, not a cold-start delay).
+    // `connect_error` is one of Socket.IO's RESERVED_EVENTS (connect,
+    // connect_error, disconnect, disconnecting, newListener, removeListener)
+    // — the server SDK throws synchronously if you `.emit()` it manually
+    // (it's meant to be generated internally by the client on a genuine
+    // handshake-level failure, e.g. a connection `io.use()` middleware
+    // calling `next(err)`; by the time `handleConnection` runs here the
+    // transport-level connection has already succeeded, so this was never
+    // going to reach the client as a real `connect_error` event anyway —
+    // dead, and actively fatal, code). No client anywhere in this repo ever
+    // listened for a server-emitted `connect_error` payload (confirmed via
+    // repo-wide search), so this was pure liability with no working
+    // consumer. Renamed to a real, non-reserved event name so the original
+    // intent (a client-visible rejection reason) is preserved for any
+    // future listener, without the crash.
+    client.emit('auth_error', { message });
     client.disconnect(true);
   }
 
