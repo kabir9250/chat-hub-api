@@ -275,7 +275,7 @@ export class ConversationsController {
       "ascending, bounded to THIS Conversation's own lead-up browsing (see " +
       'ConversationsService.computeConversationPath for the exact boundary rule; ' +
       'no longer a pure time-gap "current visit"), `attributionLabel` the ' +
-      "\"Direct traffic\"/referring-domain/UTM chip for how the Visitor landed on " +
+      '"Direct traffic"/referring-domain/UTM chip for how the Visitor landed on ' +
       'THIS specific visit. The source the floating window Visitor Info panel ' +
       'builds both the visitor-path trail and the live Time-on-site sum from, ' +
       'client-side.',
@@ -304,7 +304,7 @@ export class ConversationsController {
     description:
       'Same view scope as GET :conversationId (conversations.view_own or ' +
       '.view_site). As of the Session P2-5 redesign this computes exactly the ' +
-      "same thing GET .../current-visit does — both endpoints kept so neither " +
+      'same thing GET .../current-visit does — both endpoints kept so neither ' +
       'existing frontend call site had to change which URL it hits in the same ' +
       'pass. See ConversationsService.computeConversationPath for the boundary rule.',
   })

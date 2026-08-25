@@ -95,8 +95,27 @@ export function groupIntoVisits<
   for (let i = 1; i < recentDesc.length; i++) {
     const later = recentDesc[i - 1];
     const earlier = recentDesc[i];
-    const earlierEnd = (earlier.exitedAt ?? earlier.enteredAt).getTime();
-    const gap = later.enteredAt.getTime() - earlierEnd;
+    // Direct user feedback, found via a real 32-minute-gap live test that
+    // still reported everything as ONE visit — the gap here USED to be
+    // measured as `later.enteredAt - earlier.exitedAt`. That looked
+    // reasonable (closer to "time since they actually left the last page"
+    // than a bare enteredAt-to-enteredAt delta) but is structurally broken
+    // for every real PageVisit pair: `PageVisitsService.recordPageChange`
+    // is the ONE writer, and it sets a closed-out entry's `exitedAt` to the
+    // EXACT SAME `now` it uses as the next entry's `enteredAt`, in the same
+    // call. So `earlier.exitedAt` and `later.enteredAt` are, by
+    // construction, ALWAYS equal for two real, already-persisted PageVisit
+    // rows — making this gap ALWAYS ~0 regardless of how long the Visitor
+    // was genuinely away, so a new visit could never be detected at all
+    // (Time on site's own duration-capping fix, earlier this session, made
+    // this pre-existing flaw newly-and-differently visible when it started
+    // giving `exitedAt` an artificial 30-minute cap instead — but the gap
+    // formula itself was never sound in the first place). The only
+    // genuinely independent signal for "how long between these two
+    // navigation events" is `enteredAt`-to-`enteredAt` — each one is set
+    // once, at the moment that specific page was actually opened, never
+    // derived from or copied onto another row.
+    const gap = later.enteredAt.getTime() - earlier.enteredAt.getTime();
     if (gap > gapMs) {
       groupsDesc.push([earlier]);
     } else {
@@ -124,7 +143,10 @@ export function groupIntoVisits<
       const cap = isLatestGroup
         ? Date.now()
         : entered + CURRENT_VISIT_GAP_MINUTES * 60_000;
-      return sum + Math.max(0, Math.round((Math.min(Date.now(), cap) - entered) / 1000));
+      return (
+        sum +
+        Math.max(0, Math.round((Math.min(Date.now(), cap) - entered) / 1000))
+      );
     }, 0);
     return {
       pages,

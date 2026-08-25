@@ -13,10 +13,10 @@ export class ListVisitsQueryDto {
     example: '507f1f77bcf86cd799439060',
     description:
       'Session P2-5 redesign — scopes this to visit sessions strictly ' +
-      "before the Conversation this popover is opened from (see " +
-      'VisitorsService.findVisits\'s own doc comment for the exact ' +
+      'before the Conversation this popover is opened from (see ' +
+      "VisitorsService.findVisits's own doc comment for the exact " +
       'boundary), so a Conversation only ever shows the visit history ' +
-      "that actually predates it, never its own \"Visitor path\" data " +
+      'that actually predates it, never its own "Visitor path" data ' +
       'again.',
   })
   @IsOptional()

@@ -81,12 +81,42 @@ export interface ConversationListResult {
 }
 
 /**
+ * Phase 2, FR-P2-GRP-01–03 — the shape `findAll`/`findAllCombined` return
+ * instead of `ConversationListResult` when the caller searched by visitor
+ * name/email (`query.search`): one entry per matched Visitor, each carrying
+ * ALL of that Visitor's matching Conversations (most-recent-first), so the
+ * frontend never has to re-derive grouping from a flat list (FR-P2-GRP-03's
+ * explicit wording). `grouped: true` is a discriminant literal — present
+ * only on this shape, absent on `ConversationListResult` — so a caller can
+ * branch on `'groups' in result` without guessing from field shape alone.
+ * `total`/`page`/`limit` here paginate GROUPS (Visitors), not individual
+ * Conversations — see `findAllGroupedByVisitor`'s doc comment for why.
+ */
+export interface ConversationVisitorGroup {
+  visitor: { id: string; name: string | null; email: string | null };
+  conversations: ConversationDocument[];
+}
+
+export interface GroupedConversationListResult {
+  grouped: true;
+  groups: ConversationVisitorGroup[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+/**
  * Phase 2, FR-P2-SITE-01–04 — `findAllCombined`'s result also names exactly
  * which Sites were queried (server-resolved, per `getAuthorizedSites`) so a
  * caller/tester can confirm the merged set is exactly the caller's
  * authorized Sites, never more, never fewer.
  */
 export interface CombinedConversationListResult extends ConversationListResult {
+  siteIds: string[];
+}
+
+/** Combined-mode counterpart to `GroupedConversationListResult` — see above. */
+export interface CombinedGroupedConversationListResult extends GroupedConversationListResult {
   siteIds: string[];
 }
 
@@ -371,7 +401,7 @@ export class ConversationsService {
     actor: AuthenticatedUser,
     siteId: string,
     query: ListConversationsQueryDto,
-  ): Promise<ConversationListResult> {
+  ): Promise<ConversationListResult | GroupedConversationListResult> {
     const site = await this.assertSite(actor, siteId);
     const scope = await this.resolveScope(actor, site._id);
 
@@ -422,30 +452,26 @@ export class ConversationsService {
       filter.startedAt = startedAtRange;
     }
 
-    if (query.search) {
-      const escaped = this.escapeRegex(query.search);
-      const pattern = new RegExp(escaped, 'i');
-      const matchingVisitors = await this.visitorModel
-        .find({
-          siteId: site._id,
-          $or: [{ name: pattern }, { email: pattern }],
-        })
-        .select('_id')
-        .lean()
-        .exec();
-      if (matchingVisitors.length === 0) {
-        return {
-          items: [],
-          total: 0,
-          page: query.page ?? 1,
-          limit: query.limit ?? 20,
-        };
-      }
-      filter.visitorId = { $in: matchingVisitors.map((v) => v._id) };
-    }
-
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
+
+    // Phase 2, FR-P2-GRP-01–03 (this session) — a name/email search groups
+    // its results by Visitor rather than returning a flat list; every OTHER
+    // filter combination (status/date range/tag/rating/agentId alone, with
+    // no `search` term) is completely unaffected and keeps returning the
+    // exact flat shape Session 10.2 built — `query.search` is the ONLY
+    // thing that branches here.
+    if (query.search) {
+      const matchingVisitors = await this.findMatchingVisitorIds(
+        { siteId: site._id },
+        query.search,
+      );
+      if (matchingVisitors.length === 0) {
+        return { grouped: true, groups: [], total: 0, page, limit };
+      }
+      filter.visitorId = { $in: matchingVisitors };
+      return this.findAllGroupedByVisitor(filter, page, limit);
+    }
 
     const [items, total] = await Promise.all([
       this.conversationModel
@@ -473,7 +499,9 @@ export class ConversationsService {
   async findAllCombined(
     actor: AuthenticatedUser,
     query: ListConversationsQueryDto,
-  ): Promise<CombinedConversationListResult> {
+  ): Promise<
+    CombinedConversationListResult | CombinedGroupedConversationListResult
+  > {
     // Server-side Site-set resolution (FR-P2-SITE-02) — the ONLY input this
     // ever uses is the caller's own effective permissions, via the same
     // PermissionsService/PermissionGuard already used everywhere else in
@@ -542,21 +570,20 @@ export class ConversationsService {
     const limit = query.limit ?? 20;
     const siteIds = allSiteIds.map((id) => id.toString());
 
+    // Phase 2, FR-P2-GRP-01–03 — identical branch to findAll() above: a
+    // name/email search groups by Visitor across every authorized Site;
+    // every other filter combination keeps the flat shape unchanged.
     if (query.search) {
-      const escaped = this.escapeRegex(query.search);
-      const pattern = new RegExp(escaped, 'i');
-      const matchingVisitors = await this.visitorModel
-        .find({
-          siteId: { $in: allSiteIds },
-          $or: [{ name: pattern }, { email: pattern }],
-        })
-        .select('_id')
-        .lean()
-        .exec();
+      const matchingVisitors = await this.findMatchingVisitorIds(
+        { siteId: { $in: allSiteIds } },
+        query.search,
+      );
       if (matchingVisitors.length === 0) {
-        return { items: [], total: 0, page, limit, siteIds };
+        return { grouped: true, groups: [], total: 0, page, limit, siteIds };
       }
-      filter.visitorId = { $in: matchingVisitors.map((v) => v._id) };
+      filter.visitorId = { $in: matchingVisitors };
+      const grouped = await this.findAllGroupedByVisitor(filter, page, limit);
+      return { ...grouped, siteIds };
     }
 
     // Merged sort: most-recent activity across every authorized Site,
@@ -814,8 +841,7 @@ export class ConversationsService {
         durationSeconds: Math.max(
           0,
           Math.round(
-            (upperBoundInclusive.getTime() - capped.enteredAt.getTime()) /
-              1000,
+            (upperBoundInclusive.getTime() - capped.enteredAt.getTime()) / 1000,
           ),
         ),
       };
@@ -1544,4 +1570,106 @@ export class ConversationsService {
   private escapeRegex(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
+
+  /**
+   * Shared by `findAll`/`findAllCombined`'s `query.search` branch — a
+   * case-insensitive substring match over `Visitor.name`/`.email`, scoped by
+   * whatever `siteFilter` the caller already resolved (a single Site, or
+   * `{ siteId: { $in: allSiteIds } }` for combined mode).
+   */
+  private async findMatchingVisitorIds(
+    siteFilter: FilterQuery<VisitorDocument>,
+    search: string,
+  ): Promise<Types.ObjectId[]> {
+    const escaped = this.escapeRegex(search);
+    const pattern = new RegExp(escaped, 'i');
+    const matches = await this.visitorModel
+      .find({ ...siteFilter, $or: [{ name: pattern }, { email: pattern }] })
+      .select('_id')
+      .lean()
+      .exec();
+    return matches.map((v) => v._id);
+  }
+
+  /**
+   * Phase 2, FR-P2-GRP-01–03 — the grouped-by-visitor counterpart to
+   * `findAll`/`findAllCombined`'s normal flat query, called once `filter`
+   * already narrows to the name/email-matched Visitors (plus every other
+   * filter/scope condition the caller applied).
+   *
+   * Fetches EVERY matching Conversation (no `skip`/`limit`) rather than one
+   * page's worth — a Visitor's grouped row needs its FULL Conversation
+   * history to expand into (FR-P2-GRP-02), and slicing at the Conversation
+   * level first could split one Visitor's history across two pages of
+   * results. This is safe precisely because it only ever runs once a
+   * name/email search has already narrowed `filter.visitorId` to a small,
+   * specific set of matched Visitors — unlike the unfiltered flat list
+   * above, this is not an unbounded table scan.
+   *
+   * `page`/`limit` are applied to the resulting GROUPS (one per Visitor),
+   * not to the underlying Conversations — pagination here means "page
+   * through matched Visitors," which is what a grouped result actually is.
+   *
+   * Sorting both FR-P2-GRP-02 requires ("within an expanded group, most
+   * recent first") and FR-P2-GRP's implicit "across groups, most recent
+   * group first" fall out of a single `{ startedAt: -1 }` query plus
+   * building each group with a `Map` (which preserves insertion order): a
+   * group's conversations arrive already most-recent-first, and a group's
+   * own position among all groups is exactly where its first (= most
+   * recent) Conversation appeared in that overall feed — no separate re-sort
+   * needed for either rule.
+   */
+  private async findAllGroupedByVisitor(
+    filter: FilterQuery<ConversationDocument>,
+    page: number,
+    limit: number,
+  ): Promise<GroupedConversationListResult> {
+    const all = await this.conversationModel
+      .find(filter)
+      .sort({ startedAt: -1 })
+      .populate('visitorId', 'name email')
+      .populate('assignedAgentId', 'displayName email')
+      .exec();
+
+    const groups = new Map<
+      string,
+      { visitor: PopulatedVisitorRef; conversations: ConversationDocument[] }
+    >();
+    for (const conversation of all) {
+      const visitor = conversation.visitorId as unknown as PopulatedVisitorRef;
+      const key = visitor._id.toString();
+      const existing = groups.get(key);
+      if (existing) {
+        existing.conversations.push(conversation);
+      } else {
+        groups.set(key, { visitor, conversations: [conversation] });
+      }
+    }
+
+    const allGroups = Array.from(groups.values());
+    const total = allGroups.length;
+    const pageGroups = allGroups.slice((page - 1) * limit, page * limit);
+
+    return {
+      grouped: true,
+      groups: pageGroups.map((g) => ({
+        visitor: {
+          id: g.visitor._id.toString(),
+          name: g.visitor.name,
+          email: g.visitor.email,
+        },
+        conversations: g.conversations,
+      })),
+      total,
+      page,
+      limit,
+    };
+  }
+}
+
+/** The shape `Conversation.visitorId` populates into with `'name email'` — used only by `findAllGroupedByVisitor` above, which needs typed field access (unlike the flat list, which just hands the populated document straight to JSON). */
+interface PopulatedVisitorRef {
+  _id: Types.ObjectId;
+  name: string | null;
+  email: string | null;
 }

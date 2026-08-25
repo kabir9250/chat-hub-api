@@ -198,7 +198,7 @@ export class RealtimeGateway
           });
           break;
 
-        // This session's additions — all three broadcast to ONLY the
+        // Session 11.3's additions — broadcast to ONLY the
         // `conversation:<id>` room, per requirement 3's "any Agent
         // currently viewing that Visitor's Conversation." Room membership
         // is exclusively granted by the permission-checked
@@ -211,9 +211,24 @@ export class RealtimeGateway
             .emit('visitor.pageChanged', event);
           break;
 
+        // FR-P2-ID-02 (P2-6 addendum) — ALSO fanned out to the `site:<id>`
+        // room, not just `conversation:<id>` any more. Session 11.3 only
+        // needed this to reach an Agent already looking at that one
+        // Conversation (the Visitor Info panel); FR-P2-ID-02 additionally
+        // needs the Inbox list and any open floating-window title bar to
+        // pick up a Visitor's newly-captured name live even when nobody has
+        // that specific Conversation open (an agent scanning the Inbox
+        // never joins `conversation:<id>` — only Site-room membership,
+        // auto-granted on connect). Exactly the same double-broadcast shape
+        // `conversation.updated` already uses just above — Socket.IO's
+        // `.to(a).to(b)` unions the two rooms' sockets and emits once per
+        // socket, so an Agent who happens to be in both (has the
+        // Conversation open AND holds Site-wide view) still gets exactly
+        // one event, not two.
         case 'visitor.profileUpdated':
           this.server
             .to(conversationRoom(event.conversationId))
+            .to(siteRoom(event.siteId))
             .emit('visitor.profileUpdated', event);
           break;
 
@@ -336,6 +351,10 @@ export class RealtimeGateway
       fullName: user.fullName,
       enabled: user.enabled,
       status: user.status,
+      notificationPreferences: {
+        desktopEnabled: user.notificationPreferences.desktopEnabled,
+        soundEnabled: user.notificationPreferences.soundEnabled,
+      },
     };
     (client.data as RealtimeSocketData).user = authUser;
 

@@ -102,20 +102,34 @@ export class PageVisitsService {
       // Direct user feedback ("Time on site" reading wildly high, e.g.
       // 3h21m for a visit that only lasted a couple of minutes) — root
       // cause: closing out `previous` here always used the REAL elapsed
-      // wall-clock gap since it was entered, with no cap. A Visitor who
-      // opens a page, leaves the tab open for hours (or closes the browser
-      // entirely) and only comes back to trigger the NEXT recorded page
-      // change much later would have that entire idle gap counted as
-      // "time spent on" the page they left — they were AWAY, not actively
-      // reading, for nearly all of it. Capped at `CURRENT_VISIT_GAP_MINUTES`
-      // (the same 30-minute threshold that already defines a visit
-      // boundary everywhere else in this codebase) — past that point the
+      // wall-clock gap since it was entered, with no cap, for BOTH
+      // `exitedAt` and `durationSeconds`. A Visitor who opens a page,
+      // leaves the tab open for hours (or closes the browser entirely) and
+      // only comes back to trigger the NEXT recorded page change much
+      // later would have that entire idle gap counted as "time spent on"
+      // the page they left.
+      //
+      // BUG in the first version of this fix, found via a follow-up live
+      // test (direct user feedback: "Past visits" stayed at 0 across 4
+      // rounds genuinely 32 minutes apart, when it should have reached 3):
+      // capping `exitedAt` ITSELF at 30 minutes past `enteredAt` broke
+      // visit-boundary detection everywhere else in this codebase
+      // (`groupIntoVisits`'s gap check uses `exitedAt`) — a REAL 32-minute
+      // gap was being reported as only a ~2-minute one (32 real minutes
+      // minus the 30-minute cap already baked into `exitedAt`), so it never
+      // crossed the 30-minute new-visit threshold at all. `exitedAt` MUST
+      // stay the true, uncapped closing timestamp (`now`) — it's a
+      // structural signal other logic depends on, not just a display
+      // value. Only `durationSeconds` (the "how long were they engaged"
+      // figure `useTimeOnSite`/`groupIntoVisits`'s totals actually sum) is
+      // capped at `CURRENT_VISIT_GAP_MINUTES` — past that point the
       // Visitor is considered to have effectively left, so counting any
-      // further elapsed time toward this page's duration would misrepresent
-      // it as genuine engagement it wasn't.
+      // further elapsed time as genuine engagement would misrepresent it,
+      // but that's a display concern, entirely separate from "when did
+      // this page visit structurally end."
+      previous.exitedAt = now;
       const elapsedMs = now.getTime() - previous.enteredAt.getTime();
       const cappedMs = Math.min(elapsedMs, CURRENT_VISIT_GAP_MINUTES * 60_000);
-      previous.exitedAt = new Date(previous.enteredAt.getTime() + cappedMs);
       previous.durationSeconds = Math.max(0, Math.round(cappedMs / 1000));
       await previous.save();
     }

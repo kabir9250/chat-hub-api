@@ -68,7 +68,7 @@ export class ListConversationsQueryDto {
   @ApiPropertyOptional({
     example: '507f1f77bcf86cd799439060',
     description:
-      "Session P2-5 redesign — narrows to Conversations that started strictly " +
+      'Session P2-5 redesign — narrows to Conversations that started strictly ' +
       "before THIS Conversation's own startedAt (resolved server-side from its " +
       'own record). Combined with `visitorId` above, this is the "Past chats" ' +
       "drill-down's real scoping: only chats before the one currently open, " +

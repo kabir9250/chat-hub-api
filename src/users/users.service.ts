@@ -21,6 +21,8 @@ import { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interfa
 import { PermissionsService } from '../rbac/permissions.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { UpdateNotificationPreferencesDto } from './dto/update-notification-preferences.dto';
+import { NotificationPreferences } from '../database/schemas/user.schema';
 
 export interface UserListResult {
   items: UserDocument[];
@@ -261,6 +263,41 @@ export class UsersService {
     });
 
     return user;
+  }
+
+  /**
+   * Phase 2, SRS §2.1 / §3.8 FR-P2-NOTIF-05 — `PATCH
+   * /users/me/notification-preferences`. Deliberately NOT routed through
+   * `assertSite`/`findUserOnSite` (no `:siteId` in this route at all — see
+   * `MeController`) and gated by nothing but `JwtAuthGuard`: this only ever
+   * touches the CALLER's own document (`actor.userId`, never a `:userId`
+   * route param), so there is no cross-User/cross-Site boundary for
+   * `PermissionGuard` to enforce here, matching the SRS's explicit "no
+   * special permission needed" / "self-service" wording. Not audit-logged,
+   * same precedent as `PresenceService.setPresence` — a personal UI
+   * preference, not an access-control or Visitor-facing change.
+   */
+  async updateNotificationPreferences(
+    actor: AuthenticatedUser,
+    dto: UpdateNotificationPreferencesDto,
+  ): Promise<NotificationPreferences> {
+    const user = await this.userModel.findById(actor.userId).exec();
+    if (!user) {
+      // Can't actually happen behind JwtAuthGuard (it already re-loads and
+      // 401s on a missing User on every request) — kept for type-safety/
+      // defense in depth, same shape every other lookup in this file uses.
+      throw new NotFoundException('User not found.');
+    }
+
+    if (dto.desktopEnabled !== undefined) {
+      user.notificationPreferences.desktopEnabled = dto.desktopEnabled;
+    }
+    if (dto.soundEnabled !== undefined) {
+      user.notificationPreferences.soundEnabled = dto.soundEnabled;
+    }
+    await user.save();
+
+    return user.notificationPreferences;
   }
 
   async setEnabled(

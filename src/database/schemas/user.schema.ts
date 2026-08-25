@@ -57,6 +57,33 @@ RoleAssignmentSchema.pre('validate', function (next) {
 });
 
 /**
+ * NotificationPreferences — Phase 2 SRS §2.1 / §3.8 FR-P2-NOTIF-05.
+ *
+ * Embedded (not a separate collection — this is a per-User settings blob,
+ * always read/written together with the User), `_id: false` since it's a
+ * single fixed-shape object, not a list of sub-documents. Both flags default
+ * `true`, matching the SRS's stated default and Phase 1's existing
+ * always-on in-app alert behavior (FR-NOT-01/02) — desktop notifications and
+ * sound are opt-OUT, not opt-in.
+ *
+ * Mongoose applies subdocument defaults at hydration time too, not just on
+ * `create()` — every already-seeded User (with no `notificationPreferences`
+ * path at all in Mongo) reads back as `{ desktopEnabled: true, soundEnabled:
+ * true }` automatically, no migration/reseed needed for this field.
+ */
+@Schema({ _id: false })
+export class NotificationPreferences {
+  @Prop({ type: Boolean, required: true, default: true })
+  desktopEnabled!: boolean;
+
+  @Prop({ type: Boolean, required: true, default: true })
+  soundEnabled!: boolean;
+}
+export const NotificationPreferencesSchema = SchemaFactory.createForClass(
+  NotificationPreferences,
+);
+
+/**
  * User — SRS §4.3.
  *
  * Deliberately has NO hardcoded `role` field. Access comes entirely from
@@ -123,6 +150,12 @@ export class User {
 
   @Prop({ type: [RoleAssignmentSchema], default: [] })
   roleAssignments!: RoleAssignment[];
+
+  // Phase 2, SRS §2.1 / FR-P2-NOTIF-05 — self-service, editable by the User
+  // themself via `PATCH /users/me/notification-preferences` (no special
+  // permission required beyond being logged in as that user).
+  @Prop({ type: NotificationPreferencesSchema, default: () => ({}) })
+  notificationPreferences!: NotificationPreferences;
 
   createdAt!: Date;
   updatedAt!: Date;

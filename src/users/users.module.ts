@@ -14,6 +14,7 @@ import {
 import { AuditLogModule } from '../audit-log/audit-log.module';
 import { RbacModule } from '../rbac/rbac.module';
 import { UsersController } from './users.controller';
+import { MeController } from './me.controller';
 import { UsersService } from './users.service';
 
 @Module({
@@ -26,9 +27,12 @@ import { UsersService } from './users.service';
     ]),
     AuditLogModule,
     // Pulls in PermissionGuard + PermissionsService — see rbac.module.ts.
+    // MeController doesn't use PermissionGuard itself (JwtAuthGuard only —
+    // see its own doc comment), but RbacModule is still needed here for
+    // UsersController's existing routes in this same module.
     RbacModule,
   ],
-  controllers: [UsersController],
+  controllers: [UsersController, MeController],
   providers: [UsersService],
 })
 export class UsersModule {}

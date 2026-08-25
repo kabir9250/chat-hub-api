@@ -314,13 +314,20 @@ export class VisitorsService {
 
     if (query.beforeConversationId) {
       const ref = await this.conversationModel
-        .findOne({ _id: query.beforeConversationId, siteId: site._id, visitorId: visitor._id })
+        .findOne({
+          _id: query.beforeConversationId,
+          siteId: site._id,
+          visitorId: visitor._id,
+        })
         .select('startedAt')
         .lean()
         .exec();
       if (ref) {
         const previousConversation = await this.conversationModel
-          .findOne({ visitorId: visitor._id, startedAt: { $lt: ref.startedAt } })
+          .findOne({
+            visitorId: visitor._id,
+            startedAt: { $lt: ref.startedAt },
+          })
           .sort({ startedAt: -1 })
           .select('startedAt')
           .lean()
