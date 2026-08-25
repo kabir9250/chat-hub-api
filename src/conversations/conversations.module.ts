@@ -28,6 +28,7 @@ import { PresenceModule } from '../realtime/presence.module';
 import { RealtimeEventsModule } from '../realtime/realtime-events.module';
 import { VisitorPresenceModule } from '../realtime/visitor-presence.module';
 import { ConversationsController } from './conversations.controller';
+import { CombinedConversationsController } from './combined-conversations.controller';
 import { ConversationsService } from './conversations.service';
 import { ReferenceNumberService } from './reference-number.service';
 
@@ -67,7 +68,7 @@ import { ReferenceNumberService } from './reference-number.service';
     // doesn't import this module back).
     AnalyticsModule,
   ],
-  controllers: [ConversationsController],
+  controllers: [ConversationsController, CombinedConversationsController],
   providers: [ConversationsService, ReferenceNumberService],
   // RealtimeModule (Session 8) injects ConversationsService directly so its
   // WebSocket handlers reuse the exact same persistence/scoping logic the

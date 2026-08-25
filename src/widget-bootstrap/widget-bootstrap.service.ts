@@ -15,6 +15,7 @@ import {
   UserDocument,
   WidgetConfig,
   WidgetConfigDocument,
+  WidgetLauncherBadge,
   defaultOfflineFormFields,
   defaultPreChatFormFields,
 } from '../database/schemas';
@@ -34,12 +35,27 @@ export interface PublicWidgetConfig {
   };
   iconUrl?: string;
   primaryColor: string;
+  launcherStyle: string;
+  launcherBadge: WidgetLauncherBadge;
   messageStyle: string;
   notificationSoundEnabled: boolean;
   satisfactionRatingsEnabled: boolean;
   offlineFormEnabled: boolean;
   preChatFormFields: PublicFormField[];
   offlineFormFields: PublicFormField[];
+}
+
+/** Schema-default `WidgetLauncherBadge` values — used when a Site has no
+ * WidgetConfig document yet (see `toPublicWidgetConfig`'s no-config branch). */
+function defaultLauncherBadge(): WidgetLauncherBadge {
+  return {
+    topText: 'LIVE',
+    bottomText: 'CHAT',
+    iconColor: '#f01e3c',
+    backgroundColor: '#0a0a0a',
+    topTextColor: '#f01e3c',
+    bottomTextColor: '#ffffff',
+  };
 }
 
 /** Public, visitor-safe shape of a Trigger — no `siteId`/`isEnabled`/timestamps. */
@@ -224,6 +240,8 @@ export class WidgetBootstrapService {
         topTitle: 'support',
         concierge: { displayName: 'Live Support', byline: 'Ask us anything' },
         primaryColor: '#1E88E5',
+        launcherStyle: 'round',
+        launcherBadge: defaultLauncherBadge(),
         messageStyle: 'modern',
         notificationSoundEnabled: true,
         satisfactionRatingsEnabled: true,
@@ -241,6 +259,8 @@ export class WidgetBootstrapService {
       },
       iconUrl: config.iconUrl,
       primaryColor: config.primaryColor,
+      launcherStyle: config.launcherStyle,
+      launcherBadge: config.launcherBadge,
       messageStyle: config.messageStyle,
       notificationSoundEnabled: config.notificationSoundEnabled,
       satisfactionRatingsEnabled: config.satisfactionRatingsEnabled,

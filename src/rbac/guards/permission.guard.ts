@@ -74,6 +74,32 @@ export class PermissionGuard implements CanActivate {
       );
     }
 
+    const keysDescription =
+      metadata.permission.length === 1
+        ? `"${metadata.permission[0]}"`
+        : `one of [${metadata.permission.map((k) => `"${k}"`).join(', ')}]`;
+
+    // Phase 2, FR-P2-SITE-01–04 — 'any' has no single Site to check against
+    // (a "combined/All Sites" route); it passes if the caller holds any of
+    // the required keys on at least one Site anywhere (org-wide or a single
+    // Site-scoped grant), via the same PermissionsService the site-scoped
+    // branch below already uses — never a second, parallel check.
+    if (metadata.siteSource === 'any') {
+      const authorizedSites = await this.permissionsService.getAuthorizedSites(
+        user.userId,
+        metadata.permission,
+      );
+      if (authorizedSites.length === 0) {
+        throw new ForbiddenException(
+          `Missing required permission ${keysDescription} on any Site you have access to.`,
+        );
+      }
+      this.attachEffectivePermissions(context, [
+        ...new Set(authorizedSites.flatMap((s) => s.permissions)),
+      ]);
+      return true;
+    }
+
     const siteId = this.extractSiteId(context, metadata);
     const effectivePermissions =
       await this.permissionsService.getEffectivePermissions(
@@ -85,10 +111,6 @@ export class PermissionGuard implements CanActivate {
       effectivePermissions.includes(key),
     );
     if (!hasAny) {
-      const keysDescription =
-        metadata.permission.length === 1
-          ? `"${metadata.permission[0]}"`
-          : `one of [${metadata.permission.map((k) => `"${k}"`).join(', ')}]`;
       throw new ForbiddenException(
         `Missing required permission ${keysDescription}${siteId ? ` for site ${siteId}` : ' (organization-wide)'}.`,
       );

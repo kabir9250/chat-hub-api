@@ -17,6 +17,7 @@ import { LeadsModule } from '../leads/leads.module';
 import { RealtimeEventsModule } from '../realtime/realtime-events.module';
 import { VisitorPresenceModule } from '../realtime/visitor-presence.module';
 import { VisitorsController } from './visitors.controller';
+import { CombinedVisitorsController } from './combined-visitors.controller';
 import { VisitorsService } from './visitors.service';
 
 @Module({
@@ -41,7 +42,7 @@ import { VisitorsService } from './visitors.service';
     // FR-RPT-07 — findLive() reads which Visitors are currently online.
     VisitorPresenceModule,
   ],
-  controllers: [VisitorsController],
+  controllers: [VisitorsController, CombinedVisitorsController],
   providers: [VisitorsService],
 })
 export class VisitorsModule {}

@@ -207,8 +207,24 @@ export class VisitorSessionService {
       // load (the "current page URL"/"current" wording in FR-VIS-01) —
       // see PROGRESS.md for why this session chose "refresh every visit"
       // over "freeze at first visit" for these singular (non-array) fields.
+      //
+      // Session P2-5 redesign (direct user feedback) — BUG FIX:
+      // `pastVisitsCount` used to increment unconditionally here, once per
+      // `init()` call. Since `init()` fires on every widget boot — every
+      // full page load, for a traditional multi-page site — a Visitor
+      // browsing 5 pages in one sitting inflated this counter by 5, not the
+      // 1 genuine visit it actually was. Now only bumped when
+      // `PageVisitsService.isNewVisit()` says this page load starts a
+      // genuinely new visit (the same 30-minute gap rule "current visit"
+      // grouping already uses elsewhere) — see that method's own doc
+      // comment. This also directly satisfies the user's separate ask that
+      // a chatless visit ("open the home page and close the website") still
+      // increments the count: `init()` (and this check) run regardless of
+      // whether a Conversation ever exists.
       visitor.lastSeenAt = new Date();
-      visitor.pastVisitsCount += 1;
+      if (await this.pageVisitsService.isNewVisit(visitor._id)) {
+        visitor.pastVisitsCount += 1;
+      }
       Object.assign(visitor, attributionFields);
       await visitor.save();
     } else {
@@ -274,6 +290,18 @@ export class VisitorSessionService {
           visitorId: visitor._id,
           conversationId,
           pageUrl: input.pageUrl,
+          // Session P2-5 redesign — snapshot THIS call's own attribution
+          // onto the PageVisit row itself (see that schema's doc comment on
+          // why `Visitor.referrer`/`visitorPath` alone isn't enough for a
+          // per-past-visit "where did they land from" chip).
+          attribution: {
+            referrer: attribution.referrer,
+            landingPage: attribution.landingPage,
+            utmSource: attribution.utmSource,
+            utmMedium: attribution.utmMedium,
+            utmCampaign: attribution.utmCampaign,
+            visitorPathLabel: attribution.visitorPath,
+          },
         });
       } catch (err) {
         this.logger.warn(

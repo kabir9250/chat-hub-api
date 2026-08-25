@@ -16,6 +16,41 @@ export class WidgetConcierge {
 export const WidgetConciergeSchema =
   SchemaFactory.createForClass(WidgetConcierge);
 
+export const LAUNCHER_STYLES = ['round', 'badge'] as const;
+export type LauncherStyle = (typeof LAUNCHER_STYLES)[number];
+
+/**
+ * "LIVE / CHAT"-style badge launcher (this session's addition) — an
+ * alternative to the plain round bubble (`launcherStyle: 'badge'`),
+ * rendered by `LauncherBadgeIcon` (chat-hub-web) from a fixed SVG shape
+ * (speech-bubble icon + two-tone text badge) supplied by the client. Only
+ * the 4 colors below plus the two words are configurable — the badge's
+ * light top-plate stays fixed white by design (the contrast backdrop for
+ * `topText`), matching the reference image exactly.
+ */
+@Schema({ _id: false })
+export class WidgetLauncherBadge {
+  @Prop({ default: 'LIVE' })
+  topText!: string;
+
+  @Prop({ default: 'CHAT' })
+  bottomText!: string;
+
+  @Prop({ default: '#f01e3c' })
+  iconColor!: string;
+
+  @Prop({ default: '#0a0a0a' })
+  backgroundColor!: string;
+
+  @Prop({ default: '#f01e3c' })
+  topTextColor!: string;
+
+  @Prop({ default: '#ffffff' })
+  bottomTextColor!: string;
+}
+export const WidgetLauncherBadgeSchema =
+  SchemaFactory.createForClass(WidgetLauncherBadge);
+
 export const FORM_FIELD_TYPES = [
   'text',
   'email',
@@ -156,6 +191,12 @@ export class WidgetConfig {
 
   @Prop({ default: '#1E88E5' })
   primaryColor!: string;
+
+  @Prop({ type: String, default: 'round', enum: LAUNCHER_STYLES })
+  launcherStyle!: LauncherStyle;
+
+  @Prop({ type: WidgetLauncherBadgeSchema, default: () => ({}) })
+  launcherBadge!: WidgetLauncherBadge;
 
   @Prop({ default: 'modern' })
   messageStyle!: string;

@@ -5,15 +5,23 @@ import { PermissionKey } from '../permission.catalog';
 export const PERMISSION_METADATA_KEY = 'rbac:required_permission';
 
 /** Where PermissionGuard should read the target Site id from. */
-export type PermissionSiteSource = 'param' | 'body' | 'query' | 'none';
+export type PermissionSiteSource = 'param' | 'body' | 'query' | 'none' | 'any';
 
 export interface RequirePermissionOptions {
   /**
    * Defaults to `'param'` (the common case: routes like `/sites/:siteId/...`).
    * Use `'body'` for e.g. a create endpoint whose Site id is in the JSON
-   * payload, `'query'` for a `?siteId=` filter, or `'none'` for a check that
+   * payload, `'query'` for a `?siteId=` filter, `'none'` for a check that
    * has no Site at all — an Organization-wide permission such as
-   * `roles.manage` or `role_assignments.manage`.
+   * `roles.manage` or `role_assignments.manage` — or `'any'` (Phase 2,
+   * FR-P2-SITE-01–04) for a "combined/All Sites" route that has no single
+   * Site to check against: passes if the caller holds any of the required
+   * keys on AT LEAST ONE Site (via `PermissionsService.getAuthorizedSites`),
+   * whether that's an Organization-wide grant or a Site-scoped one on just
+   * one Site — deliberately looser than `'none'` (which only ever looks at
+   * Organization-wide grants), since a "combined" view spanning even a
+   * single authorized Site is still valid (see the "must not error for a
+   * one-Site holder" guardrail on the routes that use this).
    */
   siteSource?: PermissionSiteSource;
   /** Field name to read within that source. Defaults to `'siteId'`. */

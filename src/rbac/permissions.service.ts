@@ -222,6 +222,41 @@ export class PermissionsService {
   }
 
   /**
+   * Phase 2, FR-P2-SITE-01–04 — the server-side Site-set resolution every
+   * "combined/All Sites" endpoint (Conversations list, History search,
+   * Visitors list) and the WebSocket gateway's `agent:join_combined`
+   * handler are built on. Returns exactly the Sites where `userId` holds AT
+   * LEAST ONE of `anyOfPermissions` — via an ORGANIZATION-scoped assignment
+   * (covers every Site) or a SITE-scoped one for that specific Site — plus,
+   * for each, which of the requested keys actually matched (so a caller can
+   * tell a `view_site` Site apart from a `view_own`-only one and narrow its
+   * own query accordingly, the same way `ConversationsService.resolveScope`
+   * already does for a single Site).
+   *
+   * Deliberately reuses `getEffectivePermissionsSummary` rather than a new
+   * query — this IS "the caller's effective permissions" (FR-P2-SITE-02),
+   * computed the exact same way `GET /auth/me` computes them. Never accepts
+   * a Site list from the caller; the returned set is the only thing a
+   * "combined" endpoint is allowed to treat as the caller's authorized Sites.
+   */
+  async getAuthorizedSites(
+    userId: string | Types.ObjectId,
+    anyOfPermissions: PermissionKey[],
+  ): Promise<Array<{ siteId: string; permissions: PermissionKey[] }>> {
+    const summary = await this.getEffectivePermissionsSummary(userId);
+    const results: Array<{ siteId: string; permissions: PermissionKey[] }> = [];
+    for (const [siteId, permissions] of Object.entries(
+      summary.sitePermissions,
+    )) {
+      const matched = permissions.filter((p) => anyOfPermissions.includes(p));
+      if (matched.length > 0) {
+        results.push({ siteId, permissions: matched });
+      }
+    }
+    return results;
+  }
+
+  /**
    * FR-RBAC-09(b) — lockout guard. Returns true if, after excluding
    * `excludeAssignment` (an in-flight revoke) and/or substituting
    * `simulateRole` (an in-flight Role permissions edit), zero Users in the

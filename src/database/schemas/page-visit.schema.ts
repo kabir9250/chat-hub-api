@@ -60,6 +60,41 @@ export class PageVisit {
 
   @Prop({ type: Number, default: null })
   durationSeconds!: number | null;
+
+  // Session P2-5 redesign (direct user feedback) — attribution SNAPSHOT at
+  // the moment this page was entered, captured only when the caller has
+  // fresh attribution data (`VisitorSessionService.init()`, which re-runs
+  // `AttributionService.build()` every widget boot — the WS
+  // `visitor:page_changed` path, a mid-session SPA route change, has no new
+  // attribution to report and leaves these null). `Visitor.referrer`/
+  // `visitorPath` are a single mutable field overwritten on every visit, so
+  // they can only ever describe the visitor's LATEST landing, not "where
+  // they came from for THIS specific past visit" — the per-conversation
+  // "Visitor path" chip needs the value as it was at the time, which means
+  // it has to live on the immutable PageVisit row, not the Visitor document.
+  // Nullable/best-effort: a `null` here just means "no snapshot for this
+  // row" (a mid-session SPA nav, or a row written before this field
+  // existed) — callers fall back to `Visitor.visitorPath` in that case.
+  @Prop({ type: String, default: null })
+  referrer!: string | null;
+
+  @Prop({ type: String, default: null })
+  landingPage!: string | null;
+
+  @Prop({ type: String, default: null })
+  utmSource!: string | null;
+
+  @Prop({ type: String, default: null })
+  utmMedium!: string | null;
+
+  @Prop({ type: String, default: null })
+  utmCampaign!: string | null;
+
+  /** Precomputed "Direct traffic" / referring domain / UTM label — same
+   * value `AttributionService.computeVisitorPath()` would produce, stored
+   * here so a past visit's attribution chip doesn't need to be re-derived. */
+  @Prop({ type: String, default: null })
+  visitorPathLabel!: string | null;
 }
 
 export type PageVisitDocument = PageVisit & Document;

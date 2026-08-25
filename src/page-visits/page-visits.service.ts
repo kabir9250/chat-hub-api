@@ -7,10 +7,27 @@ import {
   ConversationDocument,
   PageVisit,
   PageVisitDocument,
+  Visitor,
+  VisitorDocument,
 } from '../database/schemas';
 import { AnalyticsEventsService } from '../analytics/analytics-events.service';
 import { RealtimeEventsService } from '../realtime/realtime-events.service';
+import { CURRENT_VISIT_GAP_MINUTES } from '../conversations/current-visit.util';
 import { derivePageCategory } from './page-category.util';
+
+/** Session P2-5 redesign — attribution snapshot to persist onto the newly-
+ * opened PageVisit row (see that schema's own doc comment on these fields
+ * for why they live here, not just on Visitor). Optional/best-effort: only
+ * `VisitorSessionService.init()` has fresh attribution to hand over; the WS
+ * `visitor:page_changed` path (a mid-session SPA route change) has none. */
+export interface PageVisitAttributionSnapshot {
+  referrer: string | null;
+  landingPage: string | null;
+  utmSource: string | null;
+  utmMedium: string | null;
+  utmCampaign: string | null;
+  visitorPathLabel: string | null;
+}
 
 export interface RecordPageChangeInput {
   siteId: Types.ObjectId | string;
@@ -25,6 +42,7 @@ export interface RecordPageChangeInput {
    */
   conversationId?: string | null;
   pageUrl: string;
+  attribution?: PageVisitAttributionSnapshot | null;
 }
 
 export interface RecordPageChangeResult {
@@ -61,6 +79,8 @@ export class PageVisitsService {
     private readonly pageVisitModel: Model<PageVisitDocument>,
     @InjectModel(Conversation.name)
     private readonly conversationModel: Model<ConversationDocument>,
+    @InjectModel(Visitor.name)
+    private readonly visitorModel: Model<VisitorDocument>,
     private readonly realtimeEvents: RealtimeEventsService,
     private readonly analyticsEvents: AnalyticsEventsService,
   ) {}
@@ -79,11 +99,24 @@ export class PageVisitsService {
       .sort({ enteredAt: -1 })
       .exec();
     if (previous) {
-      previous.exitedAt = now;
-      previous.durationSeconds = Math.max(
-        0,
-        Math.round((now.getTime() - previous.enteredAt.getTime()) / 1000),
-      );
+      // Direct user feedback ("Time on site" reading wildly high, e.g.
+      // 3h21m for a visit that only lasted a couple of minutes) — root
+      // cause: closing out `previous` here always used the REAL elapsed
+      // wall-clock gap since it was entered, with no cap. A Visitor who
+      // opens a page, leaves the tab open for hours (or closes the browser
+      // entirely) and only comes back to trigger the NEXT recorded page
+      // change much later would have that entire idle gap counted as
+      // "time spent on" the page they left — they were AWAY, not actively
+      // reading, for nearly all of it. Capped at `CURRENT_VISIT_GAP_MINUTES`
+      // (the same 30-minute threshold that already defines a visit
+      // boundary everywhere else in this codebase) — past that point the
+      // Visitor is considered to have effectively left, so counting any
+      // further elapsed time toward this page's duration would misrepresent
+      // it as genuine engagement it wasn't.
+      const elapsedMs = now.getTime() - previous.enteredAt.getTime();
+      const cappedMs = Math.min(elapsedMs, CURRENT_VISIT_GAP_MINUTES * 60_000);
+      previous.exitedAt = new Date(previous.enteredAt.getTime() + cappedMs);
+      previous.durationSeconds = Math.max(0, Math.round(cappedMs / 1000));
       await previous.save();
     }
 
@@ -102,7 +135,34 @@ export class PageVisitsService {
       enteredAt: now,
       exitedAt: null,
       durationSeconds: null,
+      referrer: input.attribution?.referrer ?? null,
+      landingPage: input.attribution?.landingPage ?? null,
+      utmSource: input.attribution?.utmSource ?? null,
+      utmMedium: input.attribution?.utmMedium ?? null,
+      utmCampaign: input.attribution?.utmCampaign ?? null,
+      visitorPathLabel: input.attribution?.visitorPathLabel ?? null,
     });
+
+    // Direct user feedback ("First seen"/"Last seen" reading identical
+    // timestamps for a Visitor with real, spread-out history) — the ONLY
+    // place `Visitor.lastSeenAt` was ever updated used to be
+    // `VisitorSessionService.init()`, which fires once per FULL page load.
+    // For an SPA route change (this method's OTHER entry point, the WS
+    // `visitor:page_changed` handler) that never re-runs `init()`,
+    // `lastSeenAt` would silently stop advancing mid-visit even while the
+    // Visitor keeps actively navigating. Since this IS the one writer for
+    // every page-navigation event regardless of which entry point triggered
+    // it (this class's own doc comment), it's also the right single place
+    // to keep `lastSeenAt` current — best-effort, never lets a failure here
+    // break page-visit tracking itself.
+    this.visitorModel
+      .updateOne({ _id: visitorId }, { $set: { lastSeenAt: now } })
+      .exec()
+      .catch((err) => {
+        this.logger.warn(
+          `Failed to bump Visitor.lastSeenAt during a page change: ${(err as Error).message}`,
+        );
+      });
 
     // FR-RPT-01 (this session) — every PageVisit opened is, by definition, a
     // page view. This is the one writer for PageVisit (see this class's own
@@ -150,6 +210,38 @@ export class PageVisitsService {
     });
 
     return { previous, current };
+  }
+
+  /**
+   * Session P2-5 redesign (direct user feedback: "visit count will also be
+   * increased if user came to our site and even just open the home page and
+   * close the website and go to some other website") — found while
+   * investigating that feedback: `VisitorSessionService.init()` was
+   * incrementing `Visitor.pastVisitsCount` on EVERY call, and `init()` fires
+   * on every widget boot, i.e. every full page load for a traditional
+   * multi-page site — so one real visitor browsing 5 pages in one sitting
+   * was inflating the counter by 5, not 1. This is the fix: "is the page
+   * load that's about to happen a genuinely NEW visit," using the exact same
+   * `CURRENT_VISIT_GAP_MINUTES` boundary `current-visit.util.ts` already
+   * defines for "current visit" grouping — reused, not re-derived. `true`
+   * when this Visitor has no PageVisit history at all yet (nothing to
+   * compare against — the very first page of the very first visit) or when
+   * the gap since their last-known page activity exceeds the threshold;
+   * `false` for a page navigated to within the same ongoing visit. Called
+   * BEFORE the new PageVisit for this page load is written (see
+   * `VisitorSessionService.init()`), so "latest" here still means the
+   * previous page, not the one about to be created.
+   */
+  async isNewVisit(visitorId: Types.ObjectId | string): Promise<boolean> {
+    const latest = await this.pageVisitModel
+      .findOne({ visitorId })
+      .sort({ enteredAt: -1 })
+      .exec();
+    if (!latest) return true;
+
+    const gapMs = CURRENT_VISIT_GAP_MINUTES * 60_000;
+    const lastActivityEnd = (latest.exitedAt ?? latest.enteredAt).getTime();
+    return Date.now() - lastActivityEnd > gapMs;
   }
 
   /**

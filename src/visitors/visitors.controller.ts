@@ -25,6 +25,7 @@ import { RequirePermission } from '../rbac/decorators/require-permission.decorat
 import { VisitorsService } from './visitors.service';
 import { UpdateVisitorDto } from './dto/update-visitor.dto';
 import { BanVisitorDto } from './dto/ban-visitor.dto';
+import { ListVisitsQueryDto } from './dto/list-visits.query.dto';
 
 const SITE_ID_PARAM = { name: 'siteId', example: '507f1f77bcf86cd799439011' };
 const VISITOR_ID_PARAM = {
@@ -90,6 +91,29 @@ export class VisitorsController {
     @Param('visitorId') visitorId: string,
   ) {
     return this.visitorsService.findOne(user, siteId, visitorId);
+  }
+
+  @ApiOperation({
+    summary:
+      "This Visitor's past visit sessions, paginated, most-recent-first (visitors.view)",
+    description:
+      'Phase 2, FR-P2-HIST-02 (Session P2-5) — "Past visits" drill-down. Groups the ' +
+      "Visitor's whole PageVisit history into distinct visit sessions (same 30-minute " +
+      'gap-boundary rule the Visitor Info panel\'s live "current visit" uses, ' +
+      'current-visit.util.ts) — each item carries a date, total duration, page count, ' +
+      'and its own page-by-page detail (`pages`).',
+  })
+  @ApiParam(SITE_ID_PARAM)
+  @ApiParam(VISITOR_ID_PARAM)
+  @Get(':visitorId/visits')
+  @RequirePermission('visitors.view')
+  findVisits(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('siteId') siteId: string,
+    @Param('visitorId') visitorId: string,
+    @Query() query: ListVisitsQueryDto,
+  ) {
+    return this.visitorsService.findVisits(user, siteId, visitorId, query);
   }
 
   @ApiOperation({

@@ -29,6 +29,7 @@ import { PresenceService, PresenceStatus } from './presence.service';
 import { RealtimeEventsService } from './realtime-events.service';
 import { VisitorPresenceService } from './visitor-presence.service';
 import { WsRateLimiterService } from '../common/rate-limit/ws-rate-limiter.service';
+import { CONVERSATION_VIEW_PERMISSIONS } from '../conversations/conversations.constants';
 import {
   agentRoom,
   conversationRoom,
@@ -37,10 +38,7 @@ import {
   visitorRoom,
 } from './realtime.types';
 
-const VIEW_PERMISSIONS = [
-  'conversations.view_own',
-  'conversations.view_site',
-] as const;
+const VIEW_PERMISSIONS = CONVERSATION_VIEW_PERMISSIONS;
 
 // §6.3 "Rate limiting on ... message sending" — same limit for both sides
 // of a conversation (30 messages/minute is generous for a human typing, but
@@ -482,6 +480,64 @@ export class RealtimeGateway
   ) {
     await client.join(siteRoom(data.siteId));
     return { event: 'joined_site', data: { siteId: data.siteId } };
+  }
+
+  /**
+   * Phase 2, FR-P2-SITE-04 — "a client requesting combined/multi-site mode
+   * joins rooms for every Site it's authorized on, and receives
+   * new-conversation/new-message events from any of them." Resolves the
+   * authorized Site set the exact same way the REST combined endpoints do
+   * (`PermissionsService.getAuthorizedSites`, `CONVERSATION_VIEW_PERMISSIONS`)
+   * — no separate authorization path.
+   *
+   * Only actually JOINS the `site:<siteId>` room for Sites where the caller
+   * holds `conversations.view_site` — `connectAsUser` above already
+   * auto-joins those unconditionally on connect (this handler mostly just
+   * re-confirms/documents that coverage and acks it back to the client);
+   * it's included here mainly for Sites the caller reaches via a
+   * SITE-scoped assignment made *after* this socket connected, without
+   * requiring a reconnect.
+   *
+   * Deliberately does NOT join the Site room for a `view_own`-only Site: the
+   * `site:<siteId>` room broadcasts `conversation:new`/`conversation:updated`
+   * for EVERY Conversation on that Site, including ones not assigned to the
+   * caller — joining it would hand a `view_own`-only holder visibility (new
+   * Visitor id, initial message, other Agents' assignments) beyond what
+   * `ConversationsService.assertVisible`/`findAllCombined` ever grant them
+   * over REST, a real RBAC-scope regression, not just an oversight. Nothing
+   * is actually lost for those Sites: a Conversation later assigned to this
+   * caller already reaches them via their personal `agent:<userId>` room
+   * (`conversation:assigned`, unconditional, any Site) regardless of Site-room
+   * membership, and any Conversation they explicitly open is covered by the
+   * existing permission-checked `agent:join_conversation` → `conversation:<id>`
+   * room — exactly the same two mechanisms the single-Site case already
+   * relies on for a `view_own`-only caller. See PROGRESS.md for the full
+   * write-up of this scope decision.
+   */
+  @SubscribeMessage('agent:join_combined')
+  @UseGuards(WsJwtGuard)
+  async handleAgentJoinCombined(@ConnectedSocket() client: Socket) {
+    const { user } = client.data as RealtimeSocketData;
+    const authorizedSites = await this.permissionsService.getAuthorizedSites(
+      user!.userId,
+      [...VIEW_PERMISSIONS],
+    );
+
+    const siteRoomsJoined: string[] = [];
+    for (const site of authorizedSites) {
+      if (site.permissions.includes('conversations.view_site')) {
+        await client.join(siteRoom(site.siteId));
+        siteRoomsJoined.push(site.siteId);
+      }
+    }
+
+    return {
+      event: 'joined_combined',
+      data: {
+        authorizedSiteIds: authorizedSites.map((s) => s.siteId),
+        siteRoomsJoined,
+      },
+    };
   }
 
   /**

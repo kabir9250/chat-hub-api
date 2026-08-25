@@ -62,6 +62,8 @@ export class WidgetConfigService {
       concierge: { ...config.concierge },
       iconUrl: config.iconUrl,
       primaryColor: config.primaryColor,
+      launcherStyle: config.launcherStyle,
+      launcherBadge: { ...config.launcherBadge },
       messageStyle: config.messageStyle,
       notificationSoundEnabled: config.notificationSoundEnabled,
       satisfactionRatingsEnabled: config.satisfactionRatingsEnabled,
@@ -81,6 +83,23 @@ export class WidgetConfigService {
     }
     if (dto.iconUrl !== undefined) config.iconUrl = dto.iconUrl;
     if (dto.primaryColor !== undefined) config.primaryColor = dto.primaryColor;
+    if (dto.launcherStyle !== undefined)
+      config.launcherStyle = dto.launcherStyle;
+    if (dto.launcherBadge !== undefined) {
+      const b = dto.launcherBadge;
+      if (b.topText !== undefined)
+        config.launcherBadge.topText = b.topText.trim();
+      if (b.bottomText !== undefined)
+        config.launcherBadge.bottomText = b.bottomText.trim();
+      if (b.iconColor !== undefined)
+        config.launcherBadge.iconColor = b.iconColor;
+      if (b.backgroundColor !== undefined)
+        config.launcherBadge.backgroundColor = b.backgroundColor;
+      if (b.topTextColor !== undefined)
+        config.launcherBadge.topTextColor = b.topTextColor;
+      if (b.bottomTextColor !== undefined)
+        config.launcherBadge.bottomTextColor = b.bottomTextColor;
+    }
     if (dto.messageStyle !== undefined)
       config.messageStyle = dto.messageStyle.trim();
     if (dto.notificationSoundEnabled !== undefined)
@@ -125,6 +144,8 @@ export class WidgetConfigService {
           concierge: { ...config.concierge },
           iconUrl: config.iconUrl,
           primaryColor: config.primaryColor,
+          launcherStyle: config.launcherStyle,
+          launcherBadge: { ...config.launcherBadge },
           messageStyle: config.messageStyle,
           notificationSoundEnabled: config.notificationSoundEnabled,
           satisfactionRatingsEnabled: config.satisfactionRatingsEnabled,

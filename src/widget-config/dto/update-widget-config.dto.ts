@@ -14,7 +14,10 @@ import {
   ValidateNested,
 } from 'class-validator';
 
-import { FORM_FIELD_TYPES } from '../../database/schemas/widget-config.schema';
+import {
+  FORM_FIELD_TYPES,
+  LAUNCHER_STYLES,
+} from '../../database/schemas/widget-config.schema';
 
 /**
  * FR-CFG-01's Concierge sub-fields, embedded on WidgetConfig
@@ -38,6 +41,48 @@ export class UpdateWidgetConciergeDto {
   @IsOptional()
   @IsUrl()
   avatarUrl?: string;
+}
+
+/**
+ * "LIVE / CHAT"-style badge launcher's editable sub-fields (this session's
+ * addition), embedded on WidgetConfig (`widget-config.schema.ts`'s
+ * `WidgetLauncherBadge`). Partial-update, same as the parent DTO. Only
+ * applied when `launcherStyle` is (or is being set to) `'badge'`, but
+ * accepted regardless so an admin can pre-configure the badge's colors
+ * before switching the style over.
+ */
+export class UpdateWidgetLauncherBadgeDto {
+  @ApiPropertyOptional({ example: 'LIVE' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(12)
+  topText?: string;
+
+  @ApiPropertyOptional({ example: 'CHAT' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(12)
+  bottomText?: string;
+
+  @ApiPropertyOptional({ example: '#f01e3c' })
+  @IsOptional()
+  @IsHexColor()
+  iconColor?: string;
+
+  @ApiPropertyOptional({ example: '#0a0a0a' })
+  @IsOptional()
+  @IsHexColor()
+  backgroundColor?: string;
+
+  @ApiPropertyOptional({ example: '#f01e3c' })
+  @IsOptional()
+  @IsHexColor()
+  topTextColor?: string;
+
+  @ApiPropertyOptional({ example: '#ffffff' })
+  @IsOptional()
+  @IsHexColor()
+  bottomTextColor?: string;
 }
 
 /**
@@ -111,6 +156,17 @@ export class UpdateWidgetConfigDto {
   @IsOptional()
   @IsHexColor()
   primaryColor?: string;
+
+  @ApiPropertyOptional({ example: 'round', enum: LAUNCHER_STYLES })
+  @IsOptional()
+  @IsIn(LAUNCHER_STYLES)
+  launcherStyle?: (typeof LAUNCHER_STYLES)[number];
+
+  @ApiPropertyOptional({ type: UpdateWidgetLauncherBadgeDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => UpdateWidgetLauncherBadgeDto)
+  launcherBadge?: UpdateWidgetLauncherBadgeDto;
 
   @ApiPropertyOptional({ example: 'modern' })
   @IsOptional()

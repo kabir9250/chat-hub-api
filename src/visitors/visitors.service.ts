@@ -15,9 +15,35 @@ import {
 import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interface';
 import { LeadsService } from '../leads/leads.service';
+import { PermissionsService } from '../rbac/permissions.service';
 import { RealtimeEventsService } from '../realtime/realtime-events.service';
 import { VisitorPresenceService } from '../realtime/visitor-presence.service';
 import { UpdateVisitorDto } from './dto/update-visitor.dto';
+import { ListVisitorsCombinedQueryDto } from './dto/list-visitors-combined.query.dto';
+import { ListVisitsQueryDto } from './dto/list-visits.query.dto';
+import {
+  computeVisitorPathLowerBound,
+  groupIntoVisits,
+  VisitGroup,
+  VISIT_HISTORY_LOOKBACK,
+} from '../conversations/current-visit.util';
+
+export interface VisitorListResult {
+  items: VisitorDocument[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+/**
+ * Phase 2, FR-P2-SITE-01–04 — `findAllCombined`'s result also names exactly
+ * which Sites were queried (server-resolved, per
+ * `PermissionsService.getAuthorizedSites`) — same transparency
+ * `CombinedConversationListResult` provides, for the same reason.
+ */
+export interface CombinedVisitorListResult extends VisitorListResult {
+  siteIds: string[];
+}
 
 export interface LiveVisitor {
   visitorId: string;
@@ -62,6 +88,7 @@ export class VisitorsService {
     private readonly leadsService: LeadsService,
     private readonly realtimeEvents: RealtimeEventsService,
     private readonly visitorPresenceService: VisitorPresenceService,
+    private readonly permissionsService: PermissionsService,
   ) {}
 
   /**
@@ -170,6 +197,151 @@ export class VisitorsService {
     }
 
     return this.visitorModel.find(filter).sort({ lastSeenAt: -1 }).exec();
+  }
+
+  /**
+   * Phase 2, FR-P2-SITE-01–04 — `GET /visitors?combined=true`. Same shape as
+   * `findAll` above, merged across every Site the caller holds `visitors.view`
+   * on, resolved server-side via `PermissionsService.getAuthorizedSites`
+   * (never a client-supplied Site list — this task's guardrail). Unlike
+   * Conversations, Visitors carries no `view_own`-style narrower scope
+   * (`visitors.view` is the only relevant key, SRS §5.13) — so, unlike
+   * `ConversationsService.findAllCombined`, there is no per-Site scope split
+   * to build; every authorized Site contributes every matching Visitor.
+   *
+   * Adds page/limit pagination `findAll` doesn't have — `findAll`'s
+   * single-Site result set is already naturally bounded by that one Site's
+   * Visitor count, but a merged multi-Site set has no such bound, so this
+   * task's "pagination/sorting that works sensibly across the merged
+   * result set" applies here specifically. `findAll` itself is unchanged
+   * (out of scope — a behavior change there wasn't asked for and risks a
+   * frontend regression on the working single-Site Visitors screen).
+   */
+  async findAllCombined(
+    actor: AuthenticatedUser,
+    query: ListVisitorsCombinedQueryDto,
+  ): Promise<CombinedVisitorListResult> {
+    const authorizedSites = await this.permissionsService.getAuthorizedSites(
+      actor.userId,
+      ['visitors.view'],
+    );
+    const siteObjectIds = authorizedSites.map(
+      (s) => new Types.ObjectId(s.siteId),
+    );
+    const siteIds = authorizedSites.map((s) => s.siteId);
+
+    const filter: FilterQuery<VisitorDocument> = {
+      siteId: { $in: siteObjectIds },
+    };
+    if (query.banned !== undefined) {
+      filter.isBanned = query.banned === 'true';
+    }
+
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+
+    // Merged sort: most-recent activity across every authorized Site,
+    // regardless of which Site a Visitor belongs to — same `lastSeenAt`
+    // field/direction `findAll()` already sorts a single Site's list by.
+    // Each returned item still carries its own `siteId` (Visitor's own
+    // field, always populated) so the frontend can badge it (FR-P2-SITE-03).
+    const [items, total] = await Promise.all([
+      this.visitorModel
+        .find(filter)
+        .sort({ lastSeenAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .exec(),
+      this.visitorModel.countDocuments(filter).exec(),
+    ]);
+
+    return { items, total, page, limit, siteIds };
+  }
+
+  /**
+   * Phase 2, FR-P2-HIST-02 (Session P2-5) — "Past visits" drill-down: this
+   * Visitor's WHOLE `PageVisit` history grouped into distinct visit
+   * sessions (via `current-visit.util.ts`'s `groupIntoVisits` — the exact
+   * same gap-boundary rule Session P2-4's "current visit" already uses,
+   * reused rather than re-derived), most-recent-first, paginated over the
+   * GROUPS (not the raw PageVisit rows — a page of "visits" should mean a
+   * page of visits, matching FR-P2-HIST-02's "distinct visit sessions").
+   * Gated by `visitors.view` (VisitorsController) — same as every other
+   * Visitor-entity read; PageVisit history isn't tied to any one
+   * Conversation's assignedAgentId the way `conversations.view_own` scoping
+   * is, so there's no narrower-scope split to apply here (see
+   * `findAllCombined`'s own doc comment making the same point for Visitors
+   * generally).
+   *
+   * Session P2-5 redesign (direct user feedback, two rounds) —
+   * `query.beforeConversationId` scopes this the same way
+   * `ConversationsService.findAll`'s `beforeConversationId` scopes "Past
+   * chats": only visit sessions that ended at-or-before the lower bound of
+   * THAT Conversation's own "Visitor path" range count as "past" for it —
+   * i.e. exactly the visit sessions `ConversationsService`'s
+   * `computeConversationPath` does NOT already claim for that Conversation's
+   * own path, so the two drill-downs never show overlapping/duplicated page
+   * data. That lower bound is computed by the exact same
+   * `computeVisitorPathLowerBound` (`current-visit.util.ts`) —
+   * reused, not re-derived — so it correctly yields zero past visits for a
+   * Visitor's first-ever Conversation, AND correctly still counts an
+   * earlier, entirely chat-less visit session as one of the "past visits"
+   * for whichever LATER Conversation is the first to actually chat (the
+   * exact scenario the user's 4-visit walkthrough spec covers: visit 1 has
+   * no chat at all, but still counts as visit 2's one past visit).
+   */
+  async findVisits(
+    actor: AuthenticatedUser,
+    siteId: string,
+    visitorId: string,
+    query: ListVisitsQueryDto,
+  ): Promise<{
+    items: VisitGroup<PageVisitDocument>[];
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const site = await this.assertSite(actor, siteId);
+    const visitor = await this.findVisitorOnSite(site, visitorId);
+
+    const recentDesc = await this.pageVisitModel
+      .find({ visitorId: visitor._id })
+      .sort({ enteredAt: -1 })
+      .limit(VISIT_HISTORY_LOOKBACK)
+      .exec();
+
+    let allVisits = groupIntoVisits(recentDesc);
+
+    if (query.beforeConversationId) {
+      const ref = await this.conversationModel
+        .findOne({ _id: query.beforeConversationId, siteId: site._id, visitorId: visitor._id })
+        .select('startedAt')
+        .lean()
+        .exec();
+      if (ref) {
+        const previousConversation = await this.conversationModel
+          .findOne({ visitorId: visitor._id, startedAt: { $lt: ref.startedAt } })
+          .sort({ startedAt: -1 })
+          .select('startedAt')
+          .lean()
+          .exec();
+        const upperBoundExclusive = computeVisitorPathLowerBound(
+          allVisits,
+          ref.startedAt,
+          previousConversation?.startedAt ?? null,
+        );
+        allVisits = allVisits.filter(
+          (g) => g.endedAt.getTime() <= upperBoundExclusive.getTime(),
+        );
+      }
+    }
+
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const start = (page - 1) * limit;
+    const items = allVisits.slice(start, start + limit);
+
+    return { items, total: allVisits.length, page, limit };
   }
 
   async findOne(

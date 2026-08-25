@@ -38,12 +38,56 @@ import { CreateConversationDto } from './dto/create-conversation.dto';
 import { ListConversationsQueryDto } from './dto/list-conversations.query.dto';
 import { SubmitRatingDto } from './dto/submit-rating.dto';
 import { GetMessagesSinceQueryDto } from './dto/get-messages-since.query.dto';
+import { CONVERSATION_VIEW_PERMISSIONS } from './conversations.constants';
+import {
+  computeVisitorPathLowerBound,
+  groupIntoVisits,
+  VISIT_HISTORY_LOOKBACK,
+} from './current-visit.util';
+
+/** Session P2-5 redesign — a Conversation's own "Visitor path" is now
+ * conversation-adjacency-bounded (see `computeConversationPath`'s doc
+ * comment), not just a list of pages: it also carries the attribution
+ * label ("Direct traffic" / referring domain / UTM source) for however the
+ * Visitor actually landed on THIS specific visit, not just their latest
+ * ever landing (`Visitor.visitorPath`).
+ *
+ * `pages` is plain (lean) objects, not hydrated `PageVisitDocument`s —
+ * `computeConversationPath` may need to hand back a PATCHED copy of the
+ * trailing entry (see its own doc comment on the frozen-Conversation
+ * duration-capping fix) without ever writing that synthetic value back to
+ * the database, which a hydrated Mongoose document's own `.save()`-shaped
+ * identity makes easy to do by accident. */
+export interface ConversationPathPage {
+  _id: Types.ObjectId;
+  pageUrl: string;
+  pageCategory: string | null;
+  enteredAt: Date;
+  exitedAt: Date | null;
+  durationSeconds: number | null;
+  visitorPathLabel: string | null;
+}
+
+export interface ConversationPathResult {
+  pages: ConversationPathPage[];
+  attributionLabel: string;
+}
 
 export interface ConversationListResult {
   items: ConversationDocument[];
   total: number;
   page: number;
   limit: number;
+}
+
+/**
+ * Phase 2, FR-P2-SITE-01–04 — `findAllCombined`'s result also names exactly
+ * which Sites were queried (server-resolved, per `getAuthorizedSites`) so a
+ * caller/tester can confirm the merged set is exactly the caller's
+ * authorized Sites, never more, never fewer.
+ */
+export interface CombinedConversationListResult extends ConversationListResult {
+  siteIds: string[];
 }
 
 export interface ConversationWithTranscript {
@@ -341,14 +385,40 @@ export class ConversationsService {
       filter.assignedAgentId = new Types.ObjectId(query.agentId);
     }
 
+    // Phase 2, FR-P2-HIST-01 (Session P2-5) — "Past chats" drill-down.
+    // Applied on top of (never in place of) the view_own/.view_site scoping
+    // above, so a view_own-only Agent drilling into a Visitor's history
+    // still only ever sees Conversations assigned to them — the same rule
+    // that already governs every other read on this endpoint.
+    if (query.visitorId) filter.visitorId = new Types.ObjectId(query.visitorId);
+
     if (query.status) filter.status = query.status;
     if (query.tag) filter.tags = query.tag;
     if (query.rating !== undefined) filter.ratingScore = query.rating;
 
-    if (query.dateFrom || query.dateTo) {
-      const startedAtRange: { $gte?: Date; $lte?: Date } = {};
-      if (query.dateFrom) startedAtRange.$gte = new Date(query.dateFrom);
-      if (query.dateTo) startedAtRange.$lte = new Date(query.dateTo);
+    const startedAtRange: { $gte?: Date; $lte?: Date; $lt?: Date } = {};
+    if (query.dateFrom) startedAtRange.$gte = new Date(query.dateFrom);
+    if (query.dateTo) startedAtRange.$lte = new Date(query.dateTo);
+
+    // Session P2-5 redesign (direct user feedback) — "Past chats" is now
+    // relative to whichever Conversation the agent is currently looking at,
+    // not a flat "every other Conversation" list: only Conversations that
+    // started strictly BEFORE `beforeConversationId`'s own `startedAt`
+    // count. Resolved server-side from the referenced Conversation's own
+    // record (never a client-supplied timestamp) — same posture every other
+    // server-resolved boundary in this codebase takes. A bad/foreign id is
+    // silently ignored (falls back to no bound) rather than erroring — this
+    // filter is additive UI sugar, not a security boundary.
+    if (query.beforeConversationId) {
+      const ref = await this.conversationModel
+        .findOne({ _id: query.beforeConversationId, siteId: site._id })
+        .select('startedAt')
+        .lean()
+        .exec();
+      if (ref) startedAtRange.$lt = ref.startedAt;
+    }
+
+    if (Object.keys(startedAtRange).length > 0) {
       filter.startedAt = startedAtRange;
     }
 
@@ -390,6 +460,125 @@ export class ConversationsService {
     ]);
 
     return { items, total, page, limit };
+  }
+
+  // ---------------------------------------------------------------------
+  // Combined/"All Sites" list (Phase 2, FR-P2-SITE-01–04) — Agent/Admin-
+  // facing, same as findAll() above but merged across every Site the caller
+  // is authorized on, resolved server-side (never from client input, per
+  // this task's guardrail). Backs BOTH the Inbox's "All Sites" mode and the
+  // History search's "All Sites" mode (same shared filter set — see
+  // ListConversationsCombinedQueryDto's doc comment).
+  // ---------------------------------------------------------------------
+  async findAllCombined(
+    actor: AuthenticatedUser,
+    query: ListConversationsQueryDto,
+  ): Promise<CombinedConversationListResult> {
+    // Server-side Site-set resolution (FR-P2-SITE-02) — the ONLY input this
+    // ever uses is the caller's own effective permissions, via the same
+    // PermissionsService/PermissionGuard already used everywhere else in
+    // this codebase (guardrail: reuse, don't build a parallel path). By the
+    // time this runs, PermissionGuard's `{ siteSource: 'any' }` check has
+    // already proven this list is non-empty.
+    const authorizedSites = await this.permissionsService.getAuthorizedSites(
+      actor.userId,
+      [...CONVERSATION_VIEW_PERMISSIONS],
+    );
+
+    const viewSiteIds: Types.ObjectId[] = [];
+    const viewOwnOnlySiteIds: Types.ObjectId[] = [];
+    for (const site of authorizedSites) {
+      if (site.permissions.includes('conversations.view_site')) {
+        viewSiteIds.push(new Types.ObjectId(site.siteId));
+      } else {
+        // Guaranteed to be conversations.view_own if it's not view_site —
+        // getAuthorizedSites only ever returns a Site here because at least
+        // one of the two keys matched.
+        viewOwnOnlySiteIds.push(new Types.ObjectId(site.siteId));
+      }
+    }
+    const allSiteIds = [...viewSiteIds, ...viewOwnOnlySiteIds];
+
+    // Same per-Site scoping rule findAll()/assertVisible() apply to a
+    // single Site, just expressed as an $or across every authorized Site at
+    // once: a view_site Site contributes every Conversation on it
+    // (optionally narrowed by ?agentId=); a view_own-only Site contributes
+    // ONLY Conversations assigned to the caller, regardless of ?agentId=
+    // (identical "hard-pinned, ignores ?agentId=" rule findAll() already
+    // enforces for a single Site).
+    const scopeConditions: FilterQuery<ConversationDocument>[] = [];
+    if (viewSiteIds.length > 0) {
+      const cond: FilterQuery<ConversationDocument> = {
+        siteId: { $in: viewSiteIds },
+      };
+      if (query.agentId)
+        cond.assignedAgentId = new Types.ObjectId(query.agentId);
+      scopeConditions.push(cond);
+    }
+    if (viewOwnOnlySiteIds.length > 0) {
+      scopeConditions.push({
+        siteId: { $in: viewOwnOnlySiteIds },
+        assignedAgentId: new Types.ObjectId(actor.userId),
+      });
+    }
+
+    const filter: FilterQuery<ConversationDocument> =
+      scopeConditions.length === 1
+        ? scopeConditions[0]
+        : { $or: scopeConditions };
+
+    if (query.status) filter.status = query.status;
+    if (query.tag) filter.tags = query.tag;
+    if (query.rating !== undefined) filter.ratingScore = query.rating;
+
+    if (query.dateFrom || query.dateTo) {
+      const startedAtRange: { $gte?: Date; $lte?: Date } = {};
+      if (query.dateFrom) startedAtRange.$gte = new Date(query.dateFrom);
+      if (query.dateTo) startedAtRange.$lte = new Date(query.dateTo);
+      filter.startedAt = startedAtRange;
+    }
+
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const siteIds = allSiteIds.map((id) => id.toString());
+
+    if (query.search) {
+      const escaped = this.escapeRegex(query.search);
+      const pattern = new RegExp(escaped, 'i');
+      const matchingVisitors = await this.visitorModel
+        .find({
+          siteId: { $in: allSiteIds },
+          $or: [{ name: pattern }, { email: pattern }],
+        })
+        .select('_id')
+        .lean()
+        .exec();
+      if (matchingVisitors.length === 0) {
+        return { items: [], total: 0, page, limit, siteIds };
+      }
+      filter.visitorId = { $in: matchingVisitors.map((v) => v._id) };
+    }
+
+    // Merged sort: most-recent activity across every authorized Site,
+    // regardless of which Site an item belongs to — same `startedAt` field
+    // (and direction) findAll() already sorts a single Site's list by, just
+    // applied over the merged set so "All Sites" reads as one interleaved
+    // timeline rather than Site-by-Site blocks. Each returned item still
+    // carries its own `siteId` (Conversation's own field, always populated)
+    // so the frontend can badge it (FR-P2-SITE-03) without any extra join.
+    const [items, total] = await Promise.all([
+      this.conversationModel
+        .find(filter)
+        .sort({ startedAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .populate('visitorId', 'name email')
+        .populate('assignedAgentId', 'displayName email')
+        .exec(),
+      this.conversationModel.countDocuments(filter).exec(),
+    ]);
+
+    return { items, total, page, limit, siteIds };
   }
 
   // ---------------------------------------------------------------------
@@ -456,6 +645,191 @@ export class ConversationsService {
       .sort({ enteredAt: -1 })
       .limit(limit)
       .exec();
+  }
+
+  /**
+   * Phase 2, FR-P2-PANEL-02/03 (Session P2-4) — the current visit's
+   * PageVisit slice for a floating window's Visitor Info panel. Session
+   * P2-5 redesign (direct user feedback, screenshots showing two different
+   * Conversations for the same Visitor sharing an identical "Visitor path")
+   * — thin wrapper over `computeConversationPath` now; see that method's
+   * doc comment for the boundary rule. Kept as its own route/method (rather
+   * than collapsing onto `getConversationVisitPageVisits` at the HTTP layer)
+   * purely so the two existing frontend call sites don't both need to
+   * change which URL they hit in the same pass — they now compute the
+   * exact same thing.
+   */
+  async getCurrentVisitPageVisits(
+    actor: AuthenticatedUser,
+    siteId: string,
+    conversationId: string,
+  ): Promise<ConversationPathResult> {
+    return this.getConversationVisitPageVisits(actor, siteId, conversationId);
+  }
+
+  /**
+   * Session P2-5 redesign (direct user feedback, two rounds) — root cause of
+   * the first report (two screenshots: a returning Visitor's separate
+   * Conversations showing an identical "Visitor path"/"Past visits"): the
+   * previous implementation bounded a Conversation's path by a pure
+   * 30-minute PageVisit gap, so two real Conversations that happened only
+   * minutes apart landed in the SAME gap-derived group and shared its
+   * entire page list. The follow-up spec (a precise 4-visit walkthrough,
+   * including a first visit with NO chat at all) then surfaced a second gap
+   * in the first fix's own approach (bounding purely by adjacent
+   * Conversations): a Visitor's first-ever chat-less VISIT would bleed its
+   * pages into whichever LATER Conversation came next, since there was no
+   * earlier Conversation to bound against at all.
+   *
+   * `computeVisitorPathLowerBound` (`current-visit.util.ts`) is the actual
+   * fix — see its own doc comment for why it needs BOTH the previous
+   * Conversation's `startedAt` AND the gap-derived visit-session boundary,
+   * taking whichever is more recent. The upper bound is simpler: THIS
+   * Conversation's own `startedAt` if a later Conversation already exists
+   * (freezing this one's path at exactly what led into it — so the NEXT
+   * Conversation's own lower bound, which is this Conversation's
+   * `startedAt`, never overlaps with what this one already claims), or
+   * "now" if this is still the Visitor's most recent Conversation (so a
+   * LIVE Conversation's path keeps growing as the Visitor navigates,
+   * exactly like the old `extractCurrentVisit`-based "current visit" did —
+   * the two concepts are unified into one rule instead of two).
+   *
+   * Also returns `attributionLabel` — the "Direct traffic"/referring-domain/
+   * UTM chip for THIS Conversation's own path specifically, sourced from
+   * whichever PageVisit is chronologically earliest in the returned trail
+   * (its own attribution snapshot — see PageVisit schema's doc comment),
+   * falling back to the Visitor's current `visitorPath` field only when no
+   * page in the trail carries a snapshot (pages written before this
+   * session's schema change, or an empty trail).
+   */
+  async getConversationVisitPageVisits(
+    actor: AuthenticatedUser,
+    siteId: string,
+    conversationId: string,
+  ): Promise<ConversationPathResult> {
+    const site = await this.assertSite(actor, siteId);
+    const conversation = await this.findConversationOnSite(
+      site._id,
+      conversationId,
+    );
+    await this.assertVisible(actor, site._id, conversation);
+
+    const visitor = await this.visitorModel
+      .findById(conversation.visitorId)
+      .select('visitorPath')
+      .lean()
+      .exec();
+
+    return this.computeConversationPath(
+      conversation.visitorId,
+      conversation.startedAt,
+      visitor?.visitorPath ?? 'Direct traffic',
+    );
+  }
+
+  /**
+   * The shared boundary rule both public methods above now compute — see
+   * `getConversationVisitPageVisits`'s doc comment for the reasoning.
+   */
+  private async computeConversationPath(
+    visitorId: Types.ObjectId,
+    conversationStartedAt: Date,
+    fallbackAttributionLabel: string,
+  ): Promise<ConversationPathResult> {
+    const [previousConversation, hasNextConversation, recentDesc] =
+      await Promise.all([
+        this.conversationModel
+          .findOne({ visitorId, startedAt: { $lt: conversationStartedAt } })
+          .sort({ startedAt: -1 })
+          .select('startedAt')
+          .lean()
+          .exec(),
+        this.conversationModel.exists({
+          visitorId,
+          startedAt: { $gt: conversationStartedAt },
+        }),
+        this.pageVisitModel
+          .find({ visitorId })
+          .sort({ enteredAt: -1 })
+          .limit(VISIT_HISTORY_LOOKBACK)
+          .lean()
+          .exec(),
+      ]);
+
+    const visitGroups = groupIntoVisits(recentDesc);
+    const lowerBoundInclusive = computeVisitorPathLowerBound(
+      visitGroups,
+      conversationStartedAt,
+      previousConversation?.startedAt ?? null,
+    );
+
+    // Upper bound is THIS Conversation's own `startedAt` — NOT the next
+    // Conversation's — whenever a later Conversation already exists.
+    // Bounding by the next Conversation's own start instead (an earlier,
+    // buggier version of this method) would let this Conversation's path
+    // silently absorb any pages the Visitor browsed AFTER this chat ended
+    // but BEFORE the next one started — exactly the pages the NEXT
+    // Conversation's own path (its own lowerBoundInclusive is this
+    // Conversation's startedAt) is supposed to own, producing the very
+    // "two Conversations sharing overlapping/duplicated path data" bug this
+    // whole redesign exists to fix. Only when this IS the Visitor's most
+    // recent Conversation (no later one yet) does the bound extend to "now"
+    // — so a still-open chat's path keeps growing live as the Visitor
+    // navigates during it (the same live behavior Session P2-4 built);
+    // once a next Conversation exists, this one's own path is frozen at
+    // exactly "what led into it."
+    const upperBoundInclusive = hasNextConversation
+      ? conversationStartedAt
+      : new Date();
+
+    const pages: ConversationPathPage[] = recentDesc.filter(
+      (pv) =>
+        pv.enteredAt.getTime() >= lowerBoundInclusive.getTime() &&
+        pv.enteredAt.getTime() <= upperBoundInclusive.getTime(),
+    );
+
+    // Direct user feedback ("Time on site" reading hours for a frozen,
+    // long-closed Conversation's own window) — `pages[0]` (most recent,
+    // since `pages` is desc-sorted) is this Conversation's own trailing
+    // page. In normal operation, once a LATER Conversation exists
+    // (`hasNextConversation`), that trailing page should already have a
+    // real `exitedAt`/`durationSeconds` — the Visitor's next real page
+    // visit (however much later) closes it out (`PageVisitsService
+    // .recordPageChange`, itself capped at `CURRENT_VISIT_GAP_MINUTES` as
+    // of this same fix). But it can still show up `null` here for older
+    // data written before that write-side cap existed. Rather than let the
+    // frontend's `useTimeOnSite`/`VisitorPathTrail` treat a `null`
+    // `exitedAt` as "still happening right now" (counting all the way to
+    // the REAL current moment — the exact wrong, wildly-inflated number the
+    // user's screenshots showed) for a Conversation that is definitely NOT
+    // live, patch a plain-object COPY with `exitedAt`/`durationSeconds`
+    // capped at this Conversation's own `upperBoundInclusive` — never
+    // written back to the database (`recentDesc` is `.lean()`, a plain
+    // object here, not a hydrated document with its own `.save()`).
+    if (hasNextConversation && pages.length > 0 && pages[0].exitedAt == null) {
+      const capped = pages[0];
+      pages[0] = {
+        ...capped,
+        exitedAt: upperBoundInclusive,
+        durationSeconds: Math.max(
+          0,
+          Math.round(
+            (upperBoundInclusive.getTime() - capped.enteredAt.getTime()) /
+              1000,
+          ),
+        ),
+      };
+    }
+
+    // `pages` is most-recent-first (same order `recentDesc` already has —
+    // no re-sort needed); the chronologically EARLIEST page (last element)
+    // is the one whose own attribution snapshot describes how the Visitor
+    // actually landed on this particular visit.
+    const earliest = pages[pages.length - 1];
+    const attributionLabel =
+      earliest?.visitorPathLabel ?? fallbackAttributionLabel;
+
+    return { pages, attributionLabel };
   }
 
   // ---------------------------------------------------------------------

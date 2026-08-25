@@ -53,6 +53,32 @@ export class ListConversationsQueryDto {
   agentId?: string;
 
   @ApiPropertyOptional({
+    example: '507f1f77bcf86cd799439033',
+    description:
+      "Phase 2, FR-P2-HIST-01 (Session P2-5) — filter to one Visitor's " +
+      'Conversations, most-recent-first (the default sort already applied by ' +
+      'this endpoint) — the "Past chats" drill-down reuses this list endpoint ' +
+      'rather than a dedicated route, since the scoping (view_own/.view_site), ' +
+      'pagination, and sort it needs already exist here unchanged.',
+  })
+  @IsOptional()
+  @IsMongoId()
+  visitorId?: string;
+
+  @ApiPropertyOptional({
+    example: '507f1f77bcf86cd799439060',
+    description:
+      "Session P2-5 redesign — narrows to Conversations that started strictly " +
+      "before THIS Conversation's own startedAt (resolved server-side from its " +
+      'own record). Combined with `visitorId` above, this is the "Past chats" ' +
+      "drill-down's real scoping: only chats before the one currently open, " +
+      'not every other chat this Visitor ever had.',
+  })
+  @IsOptional()
+  @IsMongoId()
+  beforeConversationId?: string;
+
+  @ApiPropertyOptional({
     example: 5,
     minimum: 1,
     maximum: 5,

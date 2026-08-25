@@ -6,6 +6,8 @@ import {
   ConversationSchema,
   PageVisit,
   PageVisitSchema,
+  Visitor,
+  VisitorSchema,
 } from '../database/schemas';
 import { AnalyticsModule } from '../analytics/analytics.module';
 import { RealtimeEventsModule } from '../realtime/realtime-events.module';
@@ -29,6 +31,7 @@ import { PageVisitsService } from './page-visits.service';
     MongooseModule.forFeature([
       { name: PageVisit.name, schema: PageVisitSchema },
       { name: Conversation.name, schema: ConversationSchema },
+      { name: Visitor.name, schema: VisitorSchema },
     ]),
     RealtimeEventsModule,
     AnalyticsModule,

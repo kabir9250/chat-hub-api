@@ -36,16 +36,14 @@ import { TagConversationDto } from './dto/tag-conversation.dto';
 import { CreateMessageDto } from './dto/create-message.dto';
 import { SubmitRatingDto } from './dto/submit-rating.dto';
 import { GetMessagesSinceQueryDto } from './dto/get-messages-since.query.dto';
+import { CONVERSATION_VIEW_PERMISSIONS } from './conversations.constants';
 
 const SITE_ID_PARAM = { name: 'siteId', example: '507f1f77bcf86cd799439011' };
 const CONVERSATION_ID_PARAM = {
   name: 'conversationId',
   example: '507f1f77bcf86cd799439050',
 };
-const VIEW_PERMISSIONS = [
-  'conversations.view_own',
-  'conversations.view_site',
-] as const;
+const VIEW_PERMISSIONS = CONVERSATION_VIEW_PERMISSIONS;
 
 /**
  * FR-CONV-01–07, FR-AGT-06/07/09/10/11. `:siteId` drives PermissionGuard's
@@ -262,6 +260,66 @@ export class ConversationsController {
     @Param('conversationId') conversationId: string,
   ) {
     return this.conversationsService.getPageVisits(
+      user,
+      siteId,
+      conversationId,
+    );
+  }
+
+  @ApiOperation({
+    summary:
+      "This Conversation's own Visitor-path trail (Phase 2, FR-P2-PANEL-02/03, redesigned Session P2-5)",
+    description:
+      'Same view scope as GET :conversationId (conversations.view_own or ' +
+      '.view_site). Returns `{ pages, attributionLabel }` — `pages` chronological ' +
+      "ascending, bounded to THIS Conversation's own lead-up browsing (see " +
+      'ConversationsService.computeConversationPath for the exact boundary rule; ' +
+      'no longer a pure time-gap "current visit"), `attributionLabel` the ' +
+      "\"Direct traffic\"/referring-domain/UTM chip for how the Visitor landed on " +
+      'THIS specific visit. The source the floating window Visitor Info panel ' +
+      'builds both the visitor-path trail and the live Time-on-site sum from, ' +
+      'client-side.',
+  })
+  @ApiBearerAuth('access-token')
+  @ApiParam(SITE_ID_PARAM)
+  @ApiParam(CONVERSATION_ID_PARAM)
+  @Get(':conversationId/current-visit')
+  @UseGuards(JwtAuthGuard, PermissionGuard)
+  @RequirePermission([...VIEW_PERMISSIONS])
+  getCurrentVisit(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('siteId') siteId: string,
+    @Param('conversationId') conversationId: string,
+  ) {
+    return this.conversationsService.getCurrentVisitPageVisits(
+      user,
+      siteId,
+      conversationId,
+    );
+  }
+
+  @ApiOperation({
+    summary:
+      "This Conversation's own Visitor-path trail — identical to GET .../current-visit (Session P2-5 redesign)",
+    description:
+      'Same view scope as GET :conversationId (conversations.view_own or ' +
+      '.view_site). As of the Session P2-5 redesign this computes exactly the ' +
+      "same thing GET .../current-visit does — both endpoints kept so neither " +
+      'existing frontend call site had to change which URL it hits in the same ' +
+      'pass. See ConversationsService.computeConversationPath for the boundary rule.',
+  })
+  @ApiBearerAuth('access-token')
+  @ApiParam(SITE_ID_PARAM)
+  @ApiParam(CONVERSATION_ID_PARAM)
+  @Get(':conversationId/conversation-visit')
+  @UseGuards(JwtAuthGuard, PermissionGuard)
+  @RequirePermission([...VIEW_PERMISSIONS])
+  getConversationVisit(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('siteId') siteId: string,
+    @Param('conversationId') conversationId: string,
+  ) {
+    return this.conversationsService.getConversationVisitPageVisits(
       user,
       siteId,
       conversationId,
