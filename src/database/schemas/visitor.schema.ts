@@ -42,6 +42,26 @@ export class Visitor {
   @Prop({ type: String, default: null, lowercase: true, trim: true })
   email!: string | null;
 
+  // T-11 Test 4 fix (Session Fix-05, PROGRESS.md) — `name`/`email` search
+  // (History search, grouped Inbox search) used a case-insensitive $or
+  // regex with no anchor, which cannot use a standard B-tree index (COLLSCAN
+  // every time — see `files/reports/T-11-load.md` Test 4 finding #1).
+  // `email` is already normalized lowercase via the `lowercase: true` setter
+  // above, but `name` is not — these two fields give both a stable,
+  // pre-lowercased target so the search query can run an anchored
+  // (`^prefix`), case-SENSITIVE-on-already-lowercased-text regex, which
+  // Mongo's planner *can* satisfy with an index range scan. Kept alongside
+  // (not replacing) `name`/`email` so display/edit code is untouched.
+  // Populated by the `pre('validate')` hook below — fires for both
+  // `.save()` and `insertMany()` (unlike `pre('save')`, which `insertMany`
+  // skips), so every write path (widget pre-chat form, Agent/Admin edit,
+  // `seed-test.ts`'s bulk fixture insert) stays in sync automatically.
+  @Prop({ type: String, default: null, index: true })
+  nameLower!: string | null;
+
+  @Prop({ type: String, default: null, index: true })
+  emailLower!: string | null;
+
   @Prop({ type: String, default: null })
   phone!: string | null;
 
@@ -116,3 +136,11 @@ export class Visitor {
 export type VisitorDocument = Visitor & Document;
 export const VisitorSchema = SchemaFactory.createForClass(Visitor);
 // siteId already indexed via `index: true` on the @Prop above.
+// nameLower/emailLower likewise indexed via `index: true` on their @Prop
+// above — see the comment there for why these fields exist.
+
+VisitorSchema.pre('validate', function (next) {
+  this.nameLower = this.name ? this.name.toLowerCase() : null;
+  this.emailLower = this.email ? this.email.toLowerCase() : null;
+  next();
+});

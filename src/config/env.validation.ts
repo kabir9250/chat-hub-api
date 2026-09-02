@@ -30,4 +30,36 @@ export const envValidationSchema = Joi.object({
 
   // Online geolocation fallback (AttributionService) — see configuration.ts.
   GEO_FALLBACK_ENABLED: Joi.string().valid('true', 'false').default('true'),
+
+  // Phase 2 §3.9 object storage (FR-P2-ATT-06/08) — see StorageService's
+  // doc comment. UPLOADS_DIR defaults to `<cwd>/uploads` if unset.
+  UPLOADS_DIR: Joi.string().optional(),
+  // The origin this API is actually reachable at — used to build absolute
+  // signed attachment URLs (a relative path wouldn't work: the Widget/Agent
+  // Console load images/files straight from this origin, cross-origin from
+  // their own).
+  PUBLIC_API_BASE_URL: Joi.string().uri().default('http://localhost:3001'),
+  // Same "don't ship the dev placeholder to production" rule JWT_SECRET
+  // gets above — a leaked/guessable signing secret would let anyone mint
+  // their own valid attachment links regardless of Conversation permission.
+  ATTACHMENTS_SIGNING_SECRET: Joi.string().when('NODE_ENV', {
+    is: 'production',
+    then: Joi.string()
+      .min(32)
+      .required()
+      .invalid('dev-attachments-secret-change-me'),
+    otherwise: Joi.string().required(),
+  }),
+  ATTACHMENT_SIGNED_URL_TTL_SECONDS: Joi.number().default(300),
+
+  // Session Fix-11 (§6.3 business decision, PROGRESS.md) — per-IP
+  // multi-session abuse guard (IpVisitorIdentityGuardService). Defaults are
+  // a deliberately generous starting point (see PROGRESS.md's rationale),
+  // not a hardcoded magic number in the service — tune via env once real
+  // launch traffic is observed, no code change needed.
+  IP_VISITOR_IDENTITY_MAX: Joi.number().integer().min(1).default(3),
+  IP_VISITOR_IDENTITY_WINDOW_MS: Joi.number()
+    .integer()
+    .min(1000)
+    .default(5 * 60_000),
 });

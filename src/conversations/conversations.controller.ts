@@ -155,11 +155,16 @@ export class ConversationsController {
     @Param('conversationId') conversationId: string,
     @Body() dto: AssignConversationDto,
   ) {
+    // `expectedCurrentAgentId` is intentionally passed through AS-IS
+    // (undefined if the caller omitted it entirely, null if they explicitly
+    // sent null) — the service treats "omitted" and "explicitly null"
+    // differently. See ConversationsService.assign()'s own doc comment.
     return this.conversationsService.assign(
       user,
       siteId,
       conversationId,
       dto.agentId,
+      dto.expectedCurrentAgentId,
     );
   }
 
@@ -237,6 +242,7 @@ export class ConversationsController {
       siteId,
       conversationId,
       dto.body,
+      dto.attachments,
     );
   }
 

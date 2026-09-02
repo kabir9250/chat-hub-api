@@ -85,7 +85,12 @@ export class VisitorSessionController {
   submitProfile(
     @CurrentVisitor() visitor: AuthenticatedVisitor,
     @Body() dto: SubmitVisitorProfileDto,
+    @Req() req: Request,
   ) {
-    return this.visitorSessionService.submitProfile(visitor, dto);
+    return this.visitorSessionService.submitProfile(
+      visitor,
+      dto,
+      extractClientIp(req),
+    );
   }
 }

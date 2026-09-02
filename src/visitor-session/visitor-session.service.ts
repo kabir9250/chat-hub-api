@@ -1,5 +1,7 @@
 import {
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
   NotFoundException,
@@ -31,6 +33,10 @@ import { LeadsService } from '../leads/leads.service';
 import { PageVisitsService } from '../page-visits/page-visits.service';
 import { RealtimeEventsService } from '../realtime/realtime-events.service';
 import { SubmitVisitorProfileDto } from './dto/submit-visitor-profile.dto';
+import {
+  IpVisitorIdentityGuardService,
+  TOO_MANY_ACTIVE_SESSIONS_MESSAGE,
+} from '../common/rate-limit/ip-visitor-identity-guard.service';
 
 export interface VisitorSessionResult {
   token: string;
@@ -97,6 +103,7 @@ export class VisitorSessionService {
     private readonly pageVisitsService: PageVisitsService,
     private readonly realtimeEvents: RealtimeEventsService,
     private readonly analyticsEvents: AnalyticsEventsService,
+    private readonly ipVisitorIdentityGuard: IpVisitorIdentityGuardService,
   ) {}
 
   /**
@@ -109,12 +116,27 @@ export class VisitorSessionService {
   async submitProfile(
     visitor: AuthenticatedVisitor,
     dto: SubmitVisitorProfileDto,
+    ip?: string,
   ): Promise<{
     visitorId: string;
     name: string;
     email: string;
     phone: string | null;
   }> {
+    // §6.3 business decision (Session Fix-11) — per-IP multi-session abuse
+    // guard, applied here too (task requirement 5): this endpoint is one of
+    // the two places "5 browsers from one laptop" would actually first
+    // manifest, not just at message-send time. Same shared guard/message as
+    // init() and visitor:send_message — see IpVisitorIdentityGuardService's
+    // doc comment for why an already-established identity is never
+    // throttled by this check, only a genuinely new (N+1)th one.
+    if (!this.ipVisitorIdentityGuard.checkAndRegister(ip, visitor.visitorId)) {
+      throw new HttpException(
+        { message: TOO_MANY_ACTIVE_SESSIONS_MESSAGE },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
     const visitorDoc = await this.visitorModel
       .findOne({ _id: visitor.visitorId, siteId: visitor.siteId })
       .exec();
@@ -201,6 +223,27 @@ export class VisitorSessionService {
 
     const attributionFields = this.toVisitorFields(attribution);
     const isReturningVisitor = !!visitor;
+
+    // §6.3 business decision (Session Fix-11) — per-IP multi-session abuse
+    // guard (task requirement 5: init() is where "5 browsers from one
+    // laptop" would actually first manifest — each new incognito window
+    // has no token, so it always lands in the "brand new Visitor" branch
+    // below). Checked uniformly for BOTH branches (returning and brand
+    // new) — deliberately not special-cased, see
+    // IpVisitorIdentityGuardService's own doc comment — and BEFORE the new-
+    // visitor branch creates anything, so a rejected request never leaves a
+    // spam Visitor document behind. A brand-new visitor has no `_id` yet,
+    // so one is pre-generated here and reused below for `.create()` rather
+    // than letting Mongoose mint a different one after the check passed.
+    const pendingNewVisitorId = visitor ? undefined : new Types.ObjectId();
+    const identityIdForGuard = (visitor?._id ?? pendingNewVisitorId!).toString();
+    if (!this.ipVisitorIdentityGuard.checkAndRegister(input.ip, identityIdForGuard)) {
+      throw new HttpException(
+        { message: TOO_MANY_ACTIVE_SESSIONS_MESSAGE },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
     if (visitor) {
       // Returning visitor — bump the counters SRS §4.4/FR-VIS-05 asks for,
       // and refresh attribution/technical fields to reflect *this* widget
@@ -229,6 +272,7 @@ export class VisitorSessionService {
       await visitor.save();
     } else {
       visitor = await this.visitorModel.create({
+        _id: pendingNewVisitorId,
         siteId: site._id,
         firstSeenAt: new Date(),
         lastSeenAt: new Date(),

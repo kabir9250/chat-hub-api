@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -31,8 +32,20 @@ import { AnalyticsEventsService } from '../analytics/analytics-events.service';
 import { PermissionsService } from '../rbac/permissions.service';
 import { LeadsService } from '../leads/leads.service';
 import { PresenceService } from '../realtime/presence.service';
-import { RealtimeEventsService } from '../realtime/realtime-events.service';
+import {
+  RealtimeEventsService,
+  type RealtimeMessagePayload,
+} from '../realtime/realtime-events.service';
 import { VisitorPresenceService } from '../realtime/visitor-presence.service';
+import {
+  isImageMimeType,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+} from '../storage/attachment-validation';
+import type {
+  AttachmentRefInput,
+  AttachmentWire,
+} from '../storage/attachment.types';
+import { StorageService } from '../storage/storage.service';
 import { ReferenceNumberService } from './reference-number.service';
 import { CreateConversationDto } from './dto/create-conversation.dto';
 import { ListConversationsQueryDto } from './dto/list-conversations.query.dto';
@@ -120,9 +133,12 @@ export interface CombinedGroupedConversationListResult extends GroupedConversati
   siteIds: string[];
 }
 
+/** A Message document, JSON-shaped, with `attachments` replaced by freshly-signed wire entries (FR-P2-ATT-08) — see `ConversationsService.toMessageWire`. */
+export type MessageWire = Record<string, unknown>;
+
 export interface ConversationWithTranscript {
   conversation: ConversationDocument;
-  messages: MessageDocument[];
+  messages: MessageWire[];
   /**
    * This session's addition (task requirement 14) — is the Visitor's
    * widget socket currently connected at all? Only populated by
@@ -171,6 +187,7 @@ export class ConversationsService {
     private readonly realtimeEvents: RealtimeEventsService,
     private readonly visitorPresenceService: VisitorPresenceService,
     private readonly analyticsEvents: AnalyticsEventsService,
+    private readonly storage: StorageService,
   ) {}
 
   // ---------------------------------------------------------------------
@@ -640,7 +657,11 @@ export class ConversationsService {
 
     const visitorOnline = this.visitorPresenceService.isConnected(visitorId);
 
-    return { conversation, messages, visitorOnline };
+    return {
+      conversation,
+      messages: this.toMessageWireList(messages),
+      visitorOnline,
+    };
   }
 
   /**
@@ -908,6 +929,25 @@ export class ConversationsService {
     siteId: string,
     conversationId: string,
     agentId: string,
+    // Fix for T-08 Finding #1 (files/reports/T-08-concurrency.md) — whatever
+    // the CALLER's own view of the current holder is: `null` for a first
+    // claim (Inbox "Claim" / "Assign to me" on an unassigned Conversation),
+    // a specific Agent id for "Reassign…". This is the compare-and-swap's
+    // expected-previous-value, not a new field the caller invents — see
+    // AssignControl.tsx/Inbox.tsx, which both already know the currently-
+    // displayed `assignedAgent` for exactly this reason and always pass it
+    // (real UI paths are never `undefined` here — only a raw API caller
+    // that doesn't opt in reaches the `undefined` branch below).
+    //
+    // `undefined` (the field genuinely omitted from the request body) is
+    // deliberately NOT the same as `null` ("I believe this is
+    // unassigned"): `undefined` means the caller isn't making any claim
+    // about the current holder at all, so the write proceeds unconditionally
+    // (still via the same single atomic findOneAndUpdate below — just
+    // without the compare-guard) exactly like the pre-fix behavior, so
+    // this doesn't silently reject callers who were never part of the
+    // "Assign to me"/"Reassign…"/"Claim" race this fix targets.
+    expectedCurrentAgentId?: string | null,
   ): Promise<ConversationDocument> {
     const site = await this.assertSite(actor, siteId);
     const conversation = await this.findConversationOnSite(
@@ -926,12 +966,63 @@ export class ConversationsService {
       );
     }
 
+    // Atomic compare-and-swap (T-08 Finding #1 fix) — the old code did a
+    // plain read -> mutate-in-JS -> save(), so two near-simultaneous claims
+    // on the same unassigned Conversation both returned 200, the second
+    // silently overwriting the first with zero indication to either caller
+    // that a race occurred (confirmed live, TC-08.4). The write is now a
+    // single conditional findOneAndUpdate keyed on the CURRENT
+    // assignedAgentId matching what the caller believes it to be —
+    // MongoDB only lets one concurrent caller's filter match, so exactly
+    // one of two racing calls actually updates the document; the loser's
+    // filter simply matches zero documents and falls into the 409 branch
+    // below instead of overwriting anything. The `status: pending -> open`
+    // transition rides the same atomic write (aggregation-pipeline update
+    // form) so it can't race independently of the assignment itself.
     const before = conversation.assignedAgentId?.toString() ?? null;
-    conversation.assignedAgentId = new Types.ObjectId(agentId);
-    if (conversation.status === 'pending') {
-      conversation.status = 'open';
+    const matchQuery: FilterQuery<ConversationDocument> = {
+      _id: conversation._id,
+      siteId: site._id,
+    };
+    if (expectedCurrentAgentId !== undefined) {
+      matchQuery.assignedAgentId = expectedCurrentAgentId
+        ? new Types.ObjectId(expectedCurrentAgentId)
+        : null;
     }
-    await conversation.save();
+    const updated = await this.conversationModel
+      .findOneAndUpdate(
+        matchQuery,
+        [
+          {
+            $set: {
+              assignedAgentId: new Types.ObjectId(agentId),
+              status: {
+                $cond: [{ $eq: ['$status', 'pending'] }, 'open', '$status'],
+              },
+            },
+          },
+        ],
+        { new: true },
+      )
+      .exec();
+
+    if (!updated) {
+      // Someone else's write won the race (or the caller's own view of the
+      // current holder was simply stale) — re-fetch to name who actually
+      // holds it right now, rather than a bare, unhelpful "conflict."
+      const current = await this.conversationModel
+        .findOne({ _id: conversation._id, siteId: site._id })
+        .exec();
+      const currentHolderId = current?.assignedAgentId?.toString() ?? null;
+      const holder = currentHolderId
+        ? await this.userModel.findById(currentHolderId, 'displayName').exec()
+        : null;
+      throw new ConflictException(
+        holder
+          ? `Already claimed by ${holder.displayName}.`
+          : 'This conversation was just reassigned — it is no longer unassigned.',
+      );
+    }
 
     await this.auditLog.record({
       actorType: 'user',
@@ -939,19 +1030,19 @@ export class ConversationsService {
       action: 'conversation.assigned',
       siteId: site._id,
       targetType: 'Conversation',
-      targetId: conversation._id,
+      targetId: updated._id,
       metadata: { before, after: agentId },
     });
 
     this.realtimeEvents.emit({
       kind: 'conversation.updated',
       siteId: site._id.toString(),
-      conversationId: conversation._id.toString(),
+      conversationId: updated._id.toString(),
       changeType: 'assigned',
       data: { before, after: agentId },
     });
 
-    return conversation;
+    return updated;
   }
 
   // ---------------------------------------------------------------------
@@ -1047,25 +1138,83 @@ export class ConversationsService {
     actor: AuthenticatedUser,
     siteId: string,
     conversationId: string,
-    body: string,
+    body: string | null | undefined,
+    attachments?: AttachmentRefInput[],
   ): Promise<MessageDocument> {
-    const site = await this.assertSite(actor, siteId);
-    const conversation = await this.findConversationOnSite(
-      site._id,
+    const conversation = await this.assertAgentConversationAccess(
+      actor,
+      siteId,
       conversationId,
     );
-    await this.assertVisible(actor, site._id, conversation);
+    const resolvedAttachments = this.resolveAttachmentRefs(
+      siteId,
+      conversationId,
+      attachments,
+    );
+    this.assertHasContent(body, resolvedAttachments);
 
+    // T-08 TC-08.5 fix (Findings #2, `T-08-concurrency.md`): mirrors
+    // addVisitorMessage's FR-CONV-02 reopen exactly, via the shared
+    // `reopenIfClosed` helper, instead of silently persisting an Agent
+    // message onto a Conversation another Agent closed moments earlier
+    // while leaving `status: 'closed'`.
+    await this.reopenIfClosed(conversation, {
+      actorType: 'user',
+      actorId: actor.userId,
+    });
+
+    const { deliveredAt, readAt } = this.computeInitialTickState(conversation);
     const message = await this.messageModel.create({
       conversationId: conversation._id,
       senderType: 'agent',
       senderId: new Types.ObjectId(actor.userId),
-      body,
+      body: body?.trim() ? body : null,
+      attachments: resolvedAttachments,
       sentAt: new Date(),
+      deliveredAt,
+      readAt,
     });
 
-    this.emitMessageCreated(site._id.toString(), message);
+    this.emitMessageCreated(
+      conversation.siteId.toString(),
+      message,
+      conversation.referenceNumber,
+    );
     return message;
+  }
+
+  /**
+   * Phase 2 §3.10 (FR-P2-READ-02–05) — the tick state a brand-new
+   * Agent-sent message starts at, decided ONCE at creation from the
+   * Visitor's CURRENT live state:
+   *   - not connected at all → Sent (both null) — FR-P2-READ-04. Picked up
+   *     later by `deliverPendingMessages` (below) when the Visitor
+   *     reconnects.
+   *   - connected but that Conversation isn't reported foreground →
+   *     Delivered (`deliveredAt` only) — FR-P2-READ-02.
+   *   - connected AND currently foreground → Read (both set) immediately —
+   *     matches the confirmation requirement that a message sent to an
+   *     already-open, already-foregrounded Visitor "quickly shows Read"
+   *     without waiting on a second round-trip event for THIS message.
+   * Every field set here is a forward-only starting point — nothing already
+   * persisted is ever touched by this method (FR-P2-READ-05), and every
+   * later transition (`deliverPendingMessages`/`markDeliveredMessagesRead`)
+   * only ever advances a still-null field, never overwrites a set one.
+   */
+  private computeInitialTickState(conversation: ConversationDocument): {
+    deliveredAt: Date | null;
+    readAt: Date | null;
+  } {
+    const visitorId = conversation.visitorId.toString();
+    if (!this.visitorPresenceService.isConnected(visitorId)) {
+      return { deliveredAt: null, readAt: null };
+    }
+    const now = new Date();
+    const isForeground = this.visitorPresenceService.isForeground(
+      visitorId,
+      conversation._id.toString(),
+    );
+    return { deliveredAt: now, readAt: isForeground ? now : null };
   }
 
   /**
@@ -1088,22 +1237,31 @@ export class ConversationsService {
     conversationId: string,
     body: string,
   ): Promise<MessageDocument> {
-    const site = await this.assertSite(actor, siteId);
-    const conversation = await this.findConversationOnSite(
-      site._id,
+    // Proactive outreach stays text-only this session (attachments weren't
+    // asked for on this specific flow) — no attachments param, unlike
+    // addAgentMessage above.
+    const conversation = await this.assertAgentConversationAccess(
+      actor,
+      siteId,
       conversationId,
     );
-    await this.assertVisible(actor, site._id, conversation);
 
+    const { deliveredAt, readAt } = this.computeInitialTickState(conversation);
     const message = await this.messageModel.create({
       conversationId: conversation._id,
       senderType: 'agent',
       senderId: new Types.ObjectId(actor.userId),
       body,
       sentAt: new Date(),
+      deliveredAt,
+      readAt,
     });
 
-    this.emitMessageCreated(site._id.toString(), message);
+    this.emitMessageCreated(
+      conversation.siteId.toString(),
+      message,
+      conversation.referenceNumber,
+    );
 
     const messagePayload = {
       id: message._id.toString(),
@@ -1112,10 +1270,15 @@ export class ConversationsService {
       senderId: message.senderId ? message.senderId.toString() : null,
       body: message.body,
       sentAt: message.sentAt.toISOString(),
+      attachments: [] as AttachmentWire[],
+      deliveredAt: message.deliveredAt
+        ? message.deliveredAt.toISOString()
+        : null,
+      readAt: message.readAt ? message.readAt.toISOString() : null,
     };
     this.realtimeEvents.emit({
       kind: 'agent.proactiveMessage',
-      siteId: site._id.toString(),
+      siteId: conversation.siteId.toString(),
       conversationId: conversation._id.toString(),
       visitorId: conversation.visitorId.toString(),
       message: messagePayload,
@@ -1125,7 +1288,7 @@ export class ConversationsService {
       actorType: 'user',
       actorId: actor.userId,
       action: 'conversation.proactive_message_sent',
-      siteId: site._id,
+      siteId: conversation.siteId,
       targetType: 'Conversation',
       targetId: conversation._id,
       metadata: { messageId: message._id.toString() },
@@ -1284,20 +1447,19 @@ export class ConversationsService {
   async addVisitorMessage(
     visitor: AuthenticatedVisitor,
     conversationId: string,
-    body: string,
+    body: string | null | undefined,
+    attachments?: AttachmentRefInput[],
   ): Promise<MessageDocument> {
-    const conversation = await this.conversationModel
-      .findById(conversationId)
-      .exec();
-    if (
-      !conversation ||
-      conversation.siteId.toString() !== visitor.siteId ||
-      conversation.visitorId.toString() !== visitor.visitorId
-    ) {
-      throw new NotFoundException(
-        'Conversation not found for this visitor session.',
-      );
-    }
+    const conversation = await this.assertVisitorConversationAccess(
+      visitor,
+      conversationId,
+    );
+    const resolvedAttachments = this.resolveAttachmentRefs(
+      visitor.siteId,
+      conversationId,
+      attachments,
+    );
+    this.assertHasContent(body, resolvedAttachments);
 
     const visitorDoc = await this.visitorModel
       .findById(visitor.visitorId)
@@ -1310,52 +1472,224 @@ export class ConversationsService {
 
     // FR-CONV-02: "closed conversations may be reopened if the Visitor
     // sends a new message."
-    if (conversation.status === 'closed') {
-      conversation.status = 'open';
-      conversation.closedAt = null;
-      await conversation.save();
-      await this.auditLog.record({
-        actorType: 'visitor',
-        actorId: visitor.visitorId,
-        action: 'conversation.reopened',
-        siteId: conversation.siteId,
-        targetType: 'Conversation',
-        targetId: conversation._id,
-      });
-      this.realtimeEvents.emit({
-        kind: 'conversation.updated',
-        siteId: conversation.siteId.toString(),
-        conversationId: conversation._id.toString(),
-        changeType: 'reopened',
-      });
-    }
+    await this.reopenIfClosed(conversation, {
+      actorType: 'visitor',
+      actorId: visitor.visitorId,
+    });
 
     const message = await this.messageModel.create({
       conversationId: conversation._id,
       senderType: 'visitor',
       senderId: null,
-      body,
+      body: body?.trim() ? body : null,
+      attachments: resolvedAttachments,
       sentAt: new Date(),
     });
 
-    this.emitMessageCreated(conversation.siteId.toString(), message);
+    this.emitMessageCreated(
+      conversation.siteId.toString(),
+      message,
+      conversation.referenceNumber,
+      visitorDoc?.name,
+    );
     return message;
   }
 
-  private emitMessageCreated(siteId: string, message: MessageDocument): void {
+  /**
+   * FR-CONV-02: a closed Conversation reopens on a new message — originally
+   * only wired for the Visitor side (`addVisitorMessage`); T-08 TC-08.5
+   * (Findings #2, `T-08-concurrency.md`) found the Agent side did neither
+   * of the SRS-acceptable outcomes (reopen or reject) and silently left
+   * `status: 'closed'` while persisting the new message anyway. Extracted
+   * here, unchanged in behavior from the original Visitor-only inline
+   * version, so `addAgentMessage` below can share the identical
+   * reopen/audit/broadcast logic rather than duplicating it — a no-op when
+   * the Conversation isn't currently `closed`.
+   */
+  private async reopenIfClosed(
+    conversation: ConversationDocument,
+    actor: { actorType: 'user' | 'visitor'; actorId: string },
+  ): Promise<void> {
+    if (conversation.status !== 'closed') return;
+    conversation.status = 'open';
+    conversation.closedAt = null;
+    await conversation.save();
+    await this.auditLog.record({
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      action: 'conversation.reopened',
+      siteId: conversation.siteId,
+      targetType: 'Conversation',
+      targetId: conversation._id,
+    });
+    this.realtimeEvents.emit({
+      kind: 'conversation.updated',
+      siteId: conversation.siteId.toString(),
+      conversationId: conversation._id.toString(),
+      changeType: 'reopened',
+    });
+  }
+
+  /**
+   * `referenceNumber`/`visitorName` (Session Fix-09, T-06 Findings #2/#3):
+   * threaded through to RealtimeGateway's `message.created` case so its
+   * `conversation:updated` nudge can give `useDesktopNotifications.ts` a
+   * real title (FR-P2-ID-01's name-or-reference-number rule) even for a
+   * Conversation whose window has never been opened this session, instead
+   * of falling back to the raw Mongo id. `visitorName` is optional — only
+   * the visitor-send call site below conveniently has a loaded Visitor doc
+   * to read it from.
+   */
+  private emitMessageCreated(
+    siteId: string,
+    message: MessageDocument,
+    referenceNumber: string,
+    visitorName?: string | null,
+  ): void {
     this.realtimeEvents.emit({
       kind: 'message.created',
       siteId,
       conversationId: message.conversationId.toString(),
-      message: {
-        id: message._id.toString(),
-        conversationId: message.conversationId.toString(),
-        senderType: message.senderType,
-        senderId: message.senderId ? message.senderId.toString() : null,
-        body: message.body,
-        sentAt: message.sentAt.toISOString(),
-      },
+      message: this.toRealtimeMessagePayload(message),
+      referenceNumber,
+      visitorName,
     });
+  }
+
+  /**
+   * Phase 2 §3.10 (FR-P2-READ-02–06) — re-broadcasts an ALREADY-created
+   * message's current `deliveredAt`/`readAt` after either advances
+   * (`deliverPendingMessages`/`markDeliveredMessagesRead` below), so the
+   * Agent Console's ticks update live. `visitorId` lets RealtimeGateway
+   * exclude the Visitor's own socket(s) from this one — see the gateway's
+   * `message.updated` doc comment for why.
+   */
+  private emitMessageTickUpdate(
+    siteId: string,
+    visitorId: string,
+    message: MessageDocument,
+  ): void {
+    this.realtimeEvents.emit({
+      kind: 'message.updated',
+      siteId,
+      conversationId: message.conversationId.toString(),
+      visitorId,
+      message: this.toRealtimeMessagePayload(message),
+    });
+  }
+
+  private toRealtimeMessagePayload(
+    message: MessageDocument,
+  ): RealtimeMessagePayload {
+    return {
+      id: message._id.toString(),
+      conversationId: message.conversationId.toString(),
+      attachments: (message.attachments ?? []).map((a) =>
+        this.toAttachmentWire(a),
+      ),
+      senderType: message.senderType,
+      senderId: message.senderId ? message.senderId.toString() : null,
+      body: message.body,
+      sentAt: message.sentAt.toISOString(),
+      deliveredAt: message.deliveredAt
+        ? message.deliveredAt.toISOString()
+        : null,
+      readAt: message.readAt ? message.readAt.toISOString() : null,
+    };
+  }
+
+  /**
+   * Phase 2 §3.10 (FR-P2-READ-04) — the reconnect half: every Sent
+   * (`deliveredAt: null`) Agent message in this Conversation becomes
+   * Delivered the moment the Visitor's widget (re)joins its room — this IS
+   * "successfully pushed to the Visitor's actively-connected widget
+   * WebSocket session" for a backlog the Visitor missed while disconnected,
+   * mirroring the FR-MSG-05 resync `getForVisitor` already performs for the
+   * transcript itself. Never touches an already-Delivered/Read message
+   * (FR-P2-READ-05) — the query only ever selects `deliveredAt: null` rows.
+   */
+  private async deliverPendingMessages(
+    conversation: ConversationDocument,
+    messages: MessageDocument[],
+  ): Promise<void> {
+    const pending = messages.filter(
+      (m) => m.senderType === 'agent' && !m.deliveredAt,
+    );
+    if (pending.length === 0) return;
+    const now = new Date();
+    await this.messageModel.updateMany(
+      { _id: { $in: pending.map((m) => m._id) } },
+      { $set: { deliveredAt: now } },
+    );
+    const visitorId = conversation.visitorId.toString();
+    const siteId = conversation.siteId.toString();
+    for (const m of pending) {
+      m.deliveredAt = now;
+      this.emitMessageTickUpdate(siteId, visitorId, m);
+    }
+  }
+
+  /**
+   * Phase 2 §3.10 (FR-P2-READ-03) — every currently-Delivered, unread
+   * Agent message in this Conversation becomes Read right now. Called from
+   * `setConversationForeground` below on a `foreground: true` report. Only
+   * ever selects `deliveredAt: { $ne: null }, readAt: null` rows, so a
+   * still-Sent message (Visitor disconnected before this one was ever
+   * delivered) is left alone rather than jumping straight to Read
+   * (Delivered → Read stays a real, ordered transition, never skipped).
+   */
+  private async markDeliveredMessagesRead(
+    conversation: ConversationDocument,
+  ): Promise<void> {
+    const toMark = await this.messageModel
+      .find({
+        conversationId: conversation._id,
+        senderType: 'agent',
+        deliveredAt: { $ne: null },
+        readAt: null,
+      })
+      .exec();
+    if (toMark.length === 0) return;
+    const now = new Date();
+    await this.messageModel.updateMany(
+      { _id: { $in: toMark.map((m) => m._id) } },
+      { $set: { readAt: now } },
+    );
+    const visitorId = conversation.visitorId.toString();
+    const siteId = conversation.siteId.toString();
+    for (const m of toMark) {
+      m.readAt = now;
+      this.emitMessageTickUpdate(siteId, visitorId, m);
+    }
+  }
+
+  /**
+   * Phase 2 §3.10 (FR-P2-READ-03) — entry point for RealtimeGateway's
+   * `visitor:conversation_foreground` handler. Ownership-checked the same
+   * way every other Visitor-initiated action is (`assertVisitorConversationAccess`).
+   * Records the flag unconditionally (so the NEXT agent-sent message can
+   * start already-Read, per `computeInitialTickState`), and additionally
+   * sweeps existing Delivered/unread messages to Read right now on a
+   * `true` report — covers a message that arrived WHILE already
+   * foregrounded (the flag alone wouldn't retroactively fix an
+   * already-created message).
+   */
+  async setConversationForeground(
+    visitor: AuthenticatedVisitor,
+    conversationId: string,
+    foreground: boolean,
+  ): Promise<void> {
+    const conversation = await this.assertVisitorConversationAccess(
+      visitor,
+      conversationId,
+    );
+    this.visitorPresenceService.setForeground(
+      visitor.visitorId,
+      conversation._id.toString(),
+      foreground,
+    );
+    if (!foreground) return;
+    await this.markDeliveredMessagesRead(conversation);
   }
 
   /**
@@ -1384,7 +1718,14 @@ export class ConversationsService {
       .find({ conversationId: conversation._id })
       .sort({ sentAt: 1 })
       .exec();
-    return { conversation, messages };
+    // Phase 2 §3.10 (FR-P2-READ-04) — this is the Widget's (re)join, the
+    // exact moment a reconnected Visitor's socket becomes able to actually
+    // receive live events again; any Sent message queued up while they were
+    // disconnected becomes Delivered right here. Mutates `messages` in
+    // place before serializing, so the transcript this same call returns
+    // already reflects it too.
+    await this.deliverPendingMessages(conversation, messages);
+    return { conversation, messages: this.toMessageWireList(messages) };
   }
 
   // ---------------------------------------------------------------------
@@ -1399,21 +1740,23 @@ export class ConversationsService {
     siteId: string,
     conversationId: string,
     since: GetMessagesSinceQueryDto,
-  ): Promise<MessageDocument[]> {
+  ): Promise<MessageWire[]> {
     const site = await this.assertSite(actor, siteId);
     const conversation = await this.findConversationOnSite(
       site._id,
       conversationId,
     );
     await this.assertVisible(actor, site._id, conversation);
-    return this.queryMessagesSince(conversation._id, since);
+    return this.toMessageWireList(
+      await this.queryMessagesSince(conversation._id, since),
+    );
   }
 
   async getMessagesSinceForVisitor(
     visitor: AuthenticatedVisitor,
     conversationId: string,
     since: GetMessagesSinceQueryDto,
-  ): Promise<MessageDocument[]> {
+  ): Promise<MessageWire[]> {
     const conversation = await this.conversationModel
       .findById(conversationId)
       .exec();
@@ -1426,7 +1769,9 @@ export class ConversationsService {
         'Conversation not found for this visitor session.',
       );
     }
-    return this.queryMessagesSince(conversation._id, since);
+    return this.toMessageWireList(
+      await this.queryMessagesSince(conversation._id, since),
+    );
   }
 
   private async queryMessagesSince(
@@ -1470,6 +1815,17 @@ export class ConversationsService {
     if (conversation.status !== 'closed') {
       throw new BadRequestException(
         'Only a closed Conversation can receive a rating.',
+      );
+    }
+    // Post-QA Fix 6 (T-05-data-integrity.md, TC-05.10c; FR-CONV-07 updated) —
+    // a second rating on the SAME Conversation used to silently overwrite the
+    // first. Confirmed business decision: each Conversation still gets its own
+    // independent rating (a different Conversation for the same Visitor is
+    // completely unaffected by this check); only re-rating one already-rated
+    // Conversation is now rejected instead of silently overwritten.
+    if (conversation.ratingScore != null) {
+      throw new BadRequestException(
+        'This conversation has already been rated.',
       );
     }
 
@@ -1567,24 +1923,206 @@ export class ConversationsService {
     return conversation;
   }
 
+  // ---------------------------------------------------------------------
+  // Phase 2 §3.9 (FR-P2-ATT-01/02/05/06/08) — Attachments. Shared by
+  // AttachmentsController (upload) and this class's own message-send
+  // methods below (which re-validate every referenced attachment before
+  // persisting it onto a Message — see resolveAttachmentRefs).
+  // ---------------------------------------------------------------------
+
+  /** Same access check `addAgentMessage` runs — public so AttachmentsController can gate an upload identically ("the same permission as sending a message in that Conversation", SRS §5.1) without duplicating assertSite/findConversationOnSite/assertVisible. */
+  async assertAgentConversationAccess(
+    actor: AuthenticatedUser,
+    siteId: string,
+    conversationId: string,
+  ): Promise<ConversationDocument> {
+    const site = await this.assertSite(actor, siteId);
+    const conversation = await this.findConversationOnSite(
+      site._id,
+      conversationId,
+    );
+    await this.assertVisible(actor, site._id, conversation);
+    return conversation;
+  }
+
+  /** Same ownership check `addVisitorMessage` runs (minus the banned/reopen side effects, which only make sense for an actual message send) — public so AttachmentsController can gate a Visitor's upload identically. */
+  async assertVisitorConversationAccess(
+    visitor: AuthenticatedVisitor,
+    conversationId: string,
+  ): Promise<ConversationDocument> {
+    const conversation = await this.conversationModel
+      .findById(conversationId)
+      .exec();
+    if (
+      !conversation ||
+      conversation.siteId.toString() !== visitor.siteId ||
+      conversation.visitorId.toString() !== visitor.visitorId
+    ) {
+      throw new NotFoundException(
+        'Conversation not found for this visitor session.',
+      );
+    }
+    return conversation;
+  }
+
+  /**
+   * Turns the `attachments` a send-message caller references (uploaded
+   * moments earlier via AttachmentsController, key/fileName/fileType/
+   * fileSizeBytes only) into the subdocuments actually persisted on the
+   * Message. Two checks here matter for FR-P2-ATT-08 as much as the
+   * upload-time validation does:
+   *   - the key's own `<siteId>/<conversationId>/` prefix must match THIS
+   *     conversation — without this, an Agent (or Visitor) with legitimate
+   *     access to Conversation A could reference a key they'd previously
+   *     uploaded to Conversation B (or, in principle, guessed), attaching
+   *     someone else's file to a message in a conversation the uploader may
+   *     not even have access to — the file would then get a validly-signed
+   *     URL handed to everyone who CAN view Conversation A.
+   *   - the file must still exist on disk — catches a stale/already-
+   *     consumed reference with a clear error instead of persisting a
+   *     Message whose attachment silently 404s forever after.
+   */
+  private resolveAttachmentRefs(
+    siteId: string,
+    conversationId: string,
+    refs?: AttachmentRefInput[],
+  ): Array<{
+    key: string;
+    fileName: string;
+    fileType: string;
+    fileSizeBytes: number;
+    isImage: boolean;
+  }> {
+    if (!refs || refs.length === 0) return [];
+    if (refs.length > MAX_ATTACHMENTS_PER_MESSAGE) {
+      throw new BadRequestException(
+        `A message can include at most ${MAX_ATTACHMENTS_PER_MESSAGE} attachments.`,
+      );
+    }
+    const expectedPrefix = `${siteId}/${conversationId}/`;
+    return refs.map((ref) => {
+      if (!ref.key.startsWith(expectedPrefix)) {
+        throw new ForbiddenException(
+          'One or more attachments do not belong to this conversation.',
+        );
+      }
+      if (!this.storage.fileExists(ref.key)) {
+        throw new BadRequestException(
+          'One or more attachments could not be found — please re-upload and try again.',
+        );
+      }
+      return {
+        key: ref.key,
+        fileName: ref.fileName,
+        fileType: ref.fileType,
+        fileSizeBytes: ref.fileSizeBytes,
+        isImage: isImageMimeType(ref.fileType),
+      };
+    });
+  }
+
+  /** FR-P2-ATT-07: a Message needs text OR at least one attachment — checked once here, used by every send-message path (REST + WebSocket alike funnel through addAgentMessage/addVisitorMessage/addAgentProactiveMessage). */
+  private assertHasContent(
+    body: string | null | undefined,
+    attachments: unknown[],
+  ): void {
+    if (!(body && body.trim()) && attachments.length === 0) {
+      throw new BadRequestException(
+        'A message must include text or at least one attachment.',
+      );
+    }
+  }
+
+  private toAttachmentWire(a: {
+    fileName: string;
+    fileType: string;
+    fileSizeBytes: number;
+    isImage: boolean;
+    key: string;
+  }): AttachmentWire {
+    const url = this.storage.getSignedUrl({
+      key: a.key,
+      fileName: a.fileName,
+      fileType: a.fileType,
+    });
+    return {
+      fileName: a.fileName,
+      fileType: a.fileType,
+      fileSizeBytes: a.fileSizeBytes,
+      url,
+      thumbnailUrl: a.isImage ? url : null,
+    };
+  }
+
+  /**
+   * Converts a persisted Message document into the JSON shape a client
+   * receives, with `attachments` replaced by freshly-signed wire entries
+   * (FR-P2-ATT-08 — never the stored `key`, never a stale/persisted URL).
+   * `.toObject()` keeps every other field's existing JSON shape identical
+   * to what was returned before this session (raw Mongoose documents,
+   * serialized via their own default `toJSON`) — only `attachments` differs.
+   */
+  private toMessageWire(message: MessageDocument): MessageWire {
+    const obj = message.toObject() as MessageWire;
+    const attachments = (message.attachments ?? []).map((a) =>
+      this.toAttachmentWire(a),
+    );
+    return { ...obj, attachments };
+  }
+
+  private toMessageWireList(messages: MessageDocument[]): MessageWire[] {
+    return messages.map((m) => this.toMessageWire(m));
+  }
+
   private escapeRegex(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   /**
-   * Shared by `findAll`/`findAllCombined`'s `query.search` branch — a
-   * case-insensitive substring match over `Visitor.name`/`.email`, scoped by
-   * whatever `siteFilter` the caller already resolved (a single Site, or
-   * `{ siteId: { $in: allSiteIds } }` for combined mode).
+   * Shared by `findAll`/`findAllCombined`'s `query.search` branch — matches
+   * over `Visitor.name`/`.email`, scoped by whatever `siteFilter` the caller
+   * already resolved (a single Site, or `{ siteId: { $in: allSiteIds } }`
+   * for combined mode).
+   *
+   * T-11 Test 4 fix (Session Fix-05, PROGRESS.md) — this used to be a
+   * case-insensitive ('i' flag) unanchored `$or` regex straight against
+   * `name`/`email`, which cannot use a standard B-tree index at all (a
+   * leading wildcard AND a case-insensitive flag both defeat index range
+   * bounds) — full COLLSCAN on every call, confirmed via `.explain()` in
+   * `files/reports/T-11-load.md` Test 4 finding #1. Now matches against the
+   * pre-lowercased `nameLower`/`emailLower` fields (see `visitor.schema.ts`)
+   * with an **anchored** (`^prefix`), plain (no 'i' flag — the stored value
+   * and the search term are both already lowercased) regex, which Mongo's
+   * planner CAN satisfy with an index range scan.
+   *
+   * Behavior change, deliberately made and documented (task guardrail) —
+   * search is now A PREFIX match ("starts with", case-insensitive) rather
+   * than a genuine anywhere-in-the-string substring match. Every existing
+   * automated case (T-05 TC-05.8a/b/c — `search-grouped-by-visitor.e2e-
+   * spec.ts`) searches by a full email or by the start of a name, so this
+   * change is invisible to them; re-verified after this change (see
+   * PROGRESS.md). A search term matching only mid-string (e.g. an email
+   * domain fragment not at the start, like searching "gmail" against
+   * "john@gmail.com") will no longer match — the $text-index alternative
+   * the task offered was rejected instead: MongoDB's default $text
+   * semantics OR-match individual tokens post-stemming, which would have
+   * matched far MORE broadly than today's substring search (e.g. every
+   * Visitor sharing an "@example.com" domain would match a search for one
+   * specific full email), silently breaking TC-05.8a's "exactly 1 group"
+   * assertion — worse for this app's UX than the narrower prefix-match
+   * trade-off made here.
    */
   private async findMatchingVisitorIds(
     siteFilter: FilterQuery<VisitorDocument>,
     search: string,
   ): Promise<Types.ObjectId[]> {
-    const escaped = this.escapeRegex(search);
-    const pattern = new RegExp(escaped, 'i');
+    const escaped = this.escapeRegex(search.toLowerCase());
+    const pattern = new RegExp(`^${escaped}`);
     const matches = await this.visitorModel
-      .find({ ...siteFilter, $or: [{ name: pattern }, { email: pattern }] })
+      .find({
+        ...siteFilter,
+        $or: [{ nameLower: pattern }, { emailLower: pattern }],
+      })
       .select('_id')
       .lean()
       .exec();

@@ -210,6 +210,26 @@ export class WidgetConfig {
   @Prop({ required: true, default: true })
   offlineFormEnabled!: boolean;
 
+  // Phase 2 §3.9 (FR-P2-ATT-01/02) — Site-level on/off switch for chat
+  // attachments, covering BOTH surfaces (Widget attach control AND Agent
+  // Console attach control for this Site) per direct product decision.
+  // Enforced server-side on the upload endpoints themselves
+  // (AttachmentsController), not just hidden client-side — see
+  // WidgetConfigService.isAttachmentsEnabledForSite.
+  @Prop({ required: true, default: true })
+  attachmentsEnabled!: boolean;
+
+  // Phase 2 §2.5/§3.12 (FR-P2-FORM-01–04) — whole-form on/off switch, one
+  // level above the per-field `preChatFormFields` builder just below: when
+  // `false`, the pre-chat form isn't shown at all (the Visitor can message
+  // immediately, and the resulting Visitor record is created with
+  // name/email/phone all null — already valid per the Phase 1 Visitor
+  // schema, no schema change needed there). Default `true` matches Phase 1's
+  // original mandatory-form behavior (FR-WID-05) exactly, so existing Sites
+  // are unaffected until an admin opts out.
+  @Prop({ required: true, default: true })
+  preChatFormEnabled!: boolean;
+
   // FR-CFG-01/02 "Forms" builder (this session's addition) — independently
   // configurable per Site, per form. See FormFieldConfig's doc comment for
   // the builtin-vs-custom distinction.

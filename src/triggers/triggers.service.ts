@@ -201,6 +201,22 @@ export class TriggersService {
   }
 
   private assertValidConditions(conditions: ConditionDto[]): void {
+    // Defense-in-depth guard (T-01-rbac.md Follow-ups): the DTO layer
+    // (`CreateTriggerDto.conditions`/`UpdateTriggerDto.conditions`, both
+    // `@IsArray()`) plus the global `ValidationPipe`
+    // (`whitelist`/`transform`/`forbidNonWhitelisted`, `main.ts`) already
+    // reject a missing/non-array `conditions` with a 400 before this
+    // service ever runs — confirmed live, not just by reading the code.
+    // This guard exists purely so a future caller that reaches this method
+    // WITHOUT going through that pipe (a direct service call, a bulk-import
+    // path, a test) fails with a clean 400 instead of a raw
+    // `TypeError: conditions is not iterable` crashing out as an
+    // uncaught 500.
+    if (!Array.isArray(conditions)) {
+      throw new BadRequestException(
+        'conditions is required and must be an array.',
+      );
+    }
     for (const condition of conditions) {
       switch (condition.type) {
         case 'url':

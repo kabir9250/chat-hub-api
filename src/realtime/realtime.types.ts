@@ -15,6 +15,16 @@ export interface RealtimeSocketData {
   /** Stashed by PermissionGuard on success — see permission.guard.ts. */
   effectivePermissions?: string[];
   /**
+   * Session Fix-11 — the Visitor's resolved client IP (see
+   * `extractSocketIp`), captured once in `handleConnection` (a Socket.IO
+   * connection is long-lived, unlike an HTTP request with its own `req` per
+   * call) and read by `visitor:send_message` for
+   * `IpVisitorIdentityGuardService`'s per-IP distinct-identity check. Only
+   * ever set on a Visitor socket — Agents/Users are authenticated staff,
+   * not the anonymous-identity-impersonation concern this guard targets.
+   */
+  clientIp?: string;
+  /**
    * This session's addition — the set of `conversation:<id>` rooms (bare
    * conversationId, not the room-name string) THIS socket currently holds
    * `visitors.view_live_activity` on, cached at `agent:join_conversation`
@@ -26,6 +36,31 @@ export interface RealtimeSocketData {
 }
 
 export const siteRoom = (siteId: string): string => `site:${siteId}`;
+/**
+ * This session's addition (business decision — "on by default for all
+ * Agent/Supervisor/Owner, not permission-bounded") — a separate, WIDER room
+ * than `siteRoom` above. `siteRoom` membership is deliberately gated on
+ * `conversations.view_site` (see `RealtimeGateway.connectAsUser`'s doc
+ * comment) because it carries full Site-wide Conversation content (visitor
+ * identity, message previews) that a `view_own`-only Agent must not see
+ * beyond their own assigned Conversations — that scoping is intentional and
+ * stays unchanged.
+ *
+ * `siteAlertRoom` is for the strictly-smaller set of "ambient awareness"
+ * broadcasts that were never meant to be Site-tier-gated in the first
+ * place — "a Visitor is on the site" (`visitor.online`/`.offline`/
+ * `.siteActivity`) and "a Visitor sent a message somewhere on the site"
+ * (the sound-only half of the `message.created` nudge) — every User with
+ * ANY Site-scoped Conversation-view permission (`view_own` OR `view_site`)
+ * joins it, so the live "visitor arrived"/"new message" alert sounds work
+ * for every Agent/Supervisor/Owner by default, matching how
+ * `visitors.view`-gated REST (`GET .../visitors/live`) already works for
+ * all of them today. Every `siteRoom` member is necessarily also a
+ * `siteAlertRoom` member (view_site implies "any permission"), so a
+ * broadcast can safely target `siteAlertRoom` alone without a separate
+ * `.to(siteRoom(...))` — see `RealtimeGateway`'s use sites.
+ */
+export const siteAlertRoom = (siteId: string): string => `site-alert:${siteId}`;
 export const conversationRoom = (conversationId: string): string =>
   `conversation:${conversationId}`;
 export const agentRoom = (userId: string): string => `agent:${userId}`;

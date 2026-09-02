@@ -76,3 +76,12 @@ export type ConversationDocument = Conversation & Document;
 export const ConversationSchema = SchemaFactory.createForClass(Conversation);
 ConversationSchema.index({ siteId: 1, status: 1 });
 ConversationSchema.index({ assignedAgentId: 1 });
+// T-11 Test 4 fix (Session Fix-05, PROGRESS.md) — every Inbox/History list
+// (single-Site `findAll` and combined-mode `findAllCombined`) filters by
+// `siteId` (or `siteId: {$in:[...]}`) and sorts by `startedAt` descending
+// before paginating. Without this, the `{siteId,status}` index above only
+// serves the `siteId` prefix — Mongo still has to FETCH every matching
+// Conversation and SORT in memory to find the top page. This compound index
+// lets that become a true index-ordered top-N scan instead. See
+// `files/reports/T-11-load.md` Test 4 finding #3.
+ConversationSchema.index({ siteId: 1, startedAt: -1 });

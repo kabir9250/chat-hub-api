@@ -99,38 +99,7 @@ export class PageVisitsService {
       .sort({ enteredAt: -1 })
       .exec();
     if (previous) {
-      // Direct user feedback ("Time on site" reading wildly high, e.g.
-      // 3h21m for a visit that only lasted a couple of minutes) — root
-      // cause: closing out `previous` here always used the REAL elapsed
-      // wall-clock gap since it was entered, with no cap, for BOTH
-      // `exitedAt` and `durationSeconds`. A Visitor who opens a page,
-      // leaves the tab open for hours (or closes the browser entirely) and
-      // only comes back to trigger the NEXT recorded page change much
-      // later would have that entire idle gap counted as "time spent on"
-      // the page they left.
-      //
-      // BUG in the first version of this fix, found via a follow-up live
-      // test (direct user feedback: "Past visits" stayed at 0 across 4
-      // rounds genuinely 32 minutes apart, when it should have reached 3):
-      // capping `exitedAt` ITSELF at 30 minutes past `enteredAt` broke
-      // visit-boundary detection everywhere else in this codebase
-      // (`groupIntoVisits`'s gap check uses `exitedAt`) — a REAL 32-minute
-      // gap was being reported as only a ~2-minute one (32 real minutes
-      // minus the 30-minute cap already baked into `exitedAt`), so it never
-      // crossed the 30-minute new-visit threshold at all. `exitedAt` MUST
-      // stay the true, uncapped closing timestamp (`now`) — it's a
-      // structural signal other logic depends on, not just a display
-      // value. Only `durationSeconds` (the "how long were they engaged"
-      // figure `useTimeOnSite`/`groupIntoVisits`'s totals actually sum) is
-      // capped at `CURRENT_VISIT_GAP_MINUTES` — past that point the
-      // Visitor is considered to have effectively left, so counting any
-      // further elapsed time as genuine engagement would misrepresent it,
-      // but that's a display concern, entirely separate from "when did
-      // this page visit structurally end."
-      previous.exitedAt = now;
-      const elapsedMs = now.getTime() - previous.enteredAt.getTime();
-      const cappedMs = Math.min(elapsedMs, CURRENT_VISIT_GAP_MINUTES * 60_000);
-      previous.durationSeconds = Math.max(0, Math.round(cappedMs / 1000));
+      this.closeOutPageVisit(previous, now);
       await previous.save();
     }
 
@@ -256,6 +225,82 @@ export class PageVisitsService {
     const gapMs = CURRENT_VISIT_GAP_MINUTES * 60_000;
     const lastActivityEnd = (latest.exitedAt ?? latest.enteredAt).getTime();
     return Date.now() - lastActivityEnd > gapMs;
+  }
+
+  /**
+   * T-05 TC-05.3b fix (SRS §4.4a: PageVisit.exitedAt is set "when the
+   * Visitor navigates away, closes the tab, or the session ends" — this is
+   * the "closes the tab" trigger; "navigates away" is `recordPageChange`
+   * above; "the session ends" is out of this fix's scope). Closes out this
+   * Visitor's currently-open PageVisit (if any) using the exact same
+   * closing logic `recordPageChange` uses for the previous page on a
+   * navigate-away — see `closeOutPageVisit`'s own doc comment for that
+   * logic. Triggered from `RealtimeGateway.handleDisconnect`'s visitor
+   * branch, gated on `VisitorPresenceService`'s existing "zero connections
+   * remaining" signal (that service's own `wentOffline`) — no separate
+   * disconnect-detection mechanism.
+   *
+   * Guardrail: only ever touches the ONE currently-open PageVisit
+   * (`exitedAt: null`), never an older already-closed record. That same
+   * `exitedAt: null` filter also makes this safe against the disconnect
+   * racing a genuine page-change: the ordinary case for a real tab
+   * close/navigation is the socket disconnecting around the same moment a
+   * fresh page load's `init()`/`recordPageChange` call would otherwise have
+   * closed this same PageVisit — whichever write actually lands first wins
+   * (finds the open document and closes it); the other finds nothing left
+   * matching `exitedAt: null` and is a no-op. No PageVisit is ever closed
+   * twice, and none is opened or created by this method.
+   */
+  async closeOpenPageVisitOnDisconnect(
+    visitorId: Types.ObjectId | string,
+  ): Promise<void> {
+    const open = await this.pageVisitModel
+      .findOne({ visitorId: new Types.ObjectId(visitorId), exitedAt: null })
+      .sort({ enteredAt: -1 })
+      .exec();
+    if (!open) return;
+    this.closeOutPageVisit(open, new Date());
+    await open.save();
+  }
+
+  /**
+   * Direct user feedback ("Time on site" reading wildly high, e.g. 3h21m
+   * for a visit that only lasted a couple of minutes) — root cause: closing
+   * out a PageVisit here always used the REAL elapsed wall-clock gap since
+   * it was entered, with no cap, for BOTH `exitedAt` and `durationSeconds`.
+   * A Visitor who opens a page, leaves the tab open for hours (or closes
+   * the browser entirely) and only comes back to trigger the NEXT recorded
+   * page change much later would have that entire idle gap counted as
+   * "time spent on" the page they left.
+   *
+   * BUG in the first version of this fix, found via a follow-up live test
+   * (direct user feedback: "Past visits" stayed at 0 across 4 rounds
+   * genuinely 32 minutes apart, when it should have reached 3): capping
+   * `exitedAt` ITSELF at 30 minutes past `enteredAt` broke visit-boundary
+   * detection everywhere else in this codebase (`groupIntoVisits`'s gap
+   * check uses `exitedAt`) — a REAL 32-minute gap was being reported as
+   * only a ~2-minute one (32 real minutes minus the 30-minute cap already
+   * baked into `exitedAt`), so it never crossed the 30-minute new-visit
+   * threshold at all. `exitedAt` MUST stay the true, uncapped closing
+   * timestamp (`now`) — it's a structural signal other logic depends on,
+   * not just a display value. Only `durationSeconds` (the "how long were
+   * they engaged" figure `useTimeOnSite`/`groupIntoVisits`'s totals
+   * actually sum) is capped at `CURRENT_VISIT_GAP_MINUTES` — past that
+   * point the Visitor is considered to have effectively left, so counting
+   * any further elapsed time as genuine engagement would misrepresent it,
+   * but that's a display concern, entirely separate from "when did this
+   * page visit structurally end."
+   *
+   * Shared by both closing paths (`recordPageChange`'s navigate-away case
+   * and `closeOpenPageVisitOnDisconnect`'s tab-close case, T-05 TC-05.3b) —
+   * one capping rule, reused, not reinvented per trigger. Mutates the
+   * given document in place; caller is responsible for `.save()`.
+   */
+  private closeOutPageVisit(pageVisit: PageVisitDocument, now: Date): void {
+    pageVisit.exitedAt = now;
+    const elapsedMs = now.getTime() - pageVisit.enteredAt.getTime();
+    const cappedMs = Math.min(elapsedMs, CURRENT_VISIT_GAP_MINUTES * 60_000);
+    pageVisit.durationSeconds = Math.max(0, Math.round(cappedMs / 1000));
   }
 
   /**

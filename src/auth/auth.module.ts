@@ -10,6 +10,7 @@ import { RbacModule } from '../rbac/rbac.module';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { LoginAttemptService } from './login-attempt.service';
 
 @Module({
   imports: [
@@ -32,7 +33,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     RbacModule,
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
+  providers: [AuthService, JwtStrategy, LoginAttemptService],
   exports: [JwtModule, PassportModule],
 })
 export class AuthModule {}

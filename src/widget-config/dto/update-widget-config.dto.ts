@@ -189,6 +189,24 @@ export class UpdateWidgetConfigDto {
   @IsBoolean()
   offlineFormEnabled?: boolean;
 
+  @ApiPropertyOptional({
+    example: true,
+    description:
+      'Phase 2 §3.9 — on/off for both the Widget and Agent Console attach controls on this Site.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  attachmentsEnabled?: boolean;
+
+  @ApiPropertyOptional({
+    example: true,
+    description:
+      'Phase 2 §3.12 (FR-P2-FORM-01) — when false, the Widget skips the pre-chat form entirely and lets the Visitor message immediately.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  preChatFormEnabled?: boolean;
+
   @ApiPropertyOptional({ type: [UpdateFormFieldDto] })
   @IsOptional()
   @IsArray()

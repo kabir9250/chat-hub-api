@@ -24,6 +24,9 @@ import { VisitorsModule } from './visitors/visitors.module';
 import { LeadsModule } from './leads/leads.module';
 import { ConversationsModule } from './conversations/conversations.module';
 import { AnalyticsModule } from './analytics/analytics.module';
+import { StorageModule } from './storage/storage.module';
+import { AttachmentsModule } from './attachments/attachments.module';
+import { ShortcutsModule } from './shortcuts/shortcuts.module';
 
 @Module({
   imports: [
@@ -69,6 +72,14 @@ import { AnalyticsModule } from './analytics/analytics.module';
     // directly by whichever feature modules need it (VisitorSessionModule,
     // RealtimeModule), not registered here.
     AnalyticsModule,
+    // Phase 2 §3.9 (FR-P2-ATT-01–08) — StorageModule is also imported
+    // directly by ConversationsModule (message serialization needs signed
+    // URLs); registered here too only because AttachmentsModule needs its
+    // own instance for the upload endpoints, same as any other module.
+    StorageModule,
+    AttachmentsModule,
+    // Phase 2 §2.4/§3.11 (FR-P2-SHORT-01–08) — Shortcuts (Canned Responses).
+    ShortcutsModule,
   ],
   controllers: [AppController, HealthController],
   providers: [

@@ -68,6 +68,8 @@ export class WidgetConfigService {
       notificationSoundEnabled: config.notificationSoundEnabled,
       satisfactionRatingsEnabled: config.satisfactionRatingsEnabled,
       offlineFormEnabled: config.offlineFormEnabled,
+      attachmentsEnabled: config.attachmentsEnabled,
+      preChatFormEnabled: config.preChatFormEnabled,
       preChatFormFields: config.preChatFormFields.map((f) => ({ ...f })),
       offlineFormFields: config.offlineFormFields.map((f) => ({ ...f })),
     };
@@ -108,6 +110,10 @@ export class WidgetConfigService {
       config.satisfactionRatingsEnabled = dto.satisfactionRatingsEnabled;
     if (dto.offlineFormEnabled !== undefined)
       config.offlineFormEnabled = dto.offlineFormEnabled;
+    if (dto.attachmentsEnabled !== undefined)
+      config.attachmentsEnabled = dto.attachmentsEnabled;
+    if (dto.preChatFormEnabled !== undefined)
+      config.preChatFormEnabled = dto.preChatFormEnabled;
 
     if (dto.preChatFormFields !== undefined) {
       this.assertValidFormFields(dto.preChatFormFields, {
@@ -150,6 +156,8 @@ export class WidgetConfigService {
           notificationSoundEnabled: config.notificationSoundEnabled,
           satisfactionRatingsEnabled: config.satisfactionRatingsEnabled,
           offlineFormEnabled: config.offlineFormEnabled,
+          attachmentsEnabled: config.attachmentsEnabled,
+          preChatFormEnabled: config.preChatFormEnabled,
           preChatFormFields: config.preChatFormFields.map((f) => ({ ...f })),
           offlineFormFields: config.offlineFormFields.map((f) => ({ ...f })),
         },
@@ -157,6 +165,28 @@ export class WidgetConfigService {
     });
 
     return config;
+  }
+
+  /**
+   * Phase 2 §3.9 — a lightweight, actor-free capability check (unlike
+   * `get`/`update` above, which require a `AuthenticatedUser` actor and
+   * enforce the Organization boundary via `assertSite`). Called from
+   * `AttachmentsController` for BOTH the Agent and Visitor upload routes —
+   * a Visitor has no RBAC actor at all, and an Agent's own permission to
+   * upload is already fully decided by `conversations.view_*` (unrelated to
+   * `widget_config.view`/`.manage`, which gate the ADMIN screen this flag
+   * lives on, not whether attachments themselves are on). Defaults to
+   * `true` (same as the schema default) when a Site has no WidgetConfig
+   * document yet, matching `WidgetBootstrapService`'s own no-config
+   * fallback.
+   */
+  async isAttachmentsEnabledForSite(siteId: string): Promise<boolean> {
+    const config = await this.widgetConfigModel
+      .findOne({ siteId })
+      .select('attachmentsEnabled')
+      .lean()
+      .exec();
+    return config?.attachmentsEnabled ?? true;
   }
 
   /**

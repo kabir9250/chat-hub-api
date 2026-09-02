@@ -18,6 +18,7 @@ import { PageVisitsModule } from '../page-visits/page-visits.module';
 import { RealtimeEventsModule } from '../realtime/realtime-events.module';
 import { VisitorSessionService } from './visitor-session.service';
 import { VisitorSessionController } from './visitor-session.controller';
+import { IpVisitorIdentityGuardModule } from '../common/rate-limit/ip-visitor-identity-guard.module';
 
 @Module({
   imports: [
@@ -47,6 +48,12 @@ import { VisitorSessionController } from './visitor-session.controller';
     // (every init()) / uniqueVisitor (new Visitor only). AnalyticsModule
     // doesn't import this module back, so no cycle.
     AnalyticsModule,
+    // Session Fix-11 — per-IP multi-session abuse guard (§6.3 business
+    // decision), shared with RealtimeModule via this same leaf module so
+    // both resolve one singleton (see its own doc comment). init()/
+    // submitProfile() are the two REST touchpoints where a new distinct
+    // Visitor identity is effectively created/confirmed from an IP.
+    IpVisitorIdentityGuardModule,
   ],
   controllers: [VisitorSessionController],
   providers: [VisitorSessionService],

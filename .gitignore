@@ -37,6 +37,7 @@ lerna-debug.log*
 
 # dotenv environment variable files
 .env
+.env.test
 .env.development.local
 .env.test.local
 .env.production.local
@@ -45,6 +46,15 @@ lerna-debug.log*
 # temp directory
 .temp
 .tmp
+
+# Phase 2 §3.9 — uploaded attachment binaries (local-disk storage stand-in,
+# see PROGRESS.md "Object storage" entry). Never committed — same reasoning
+# as any other user-uploaded content; a real S3-compatible bucket replaces
+# this directory in production.
+/uploads
+# Same reasoning as /uploads above — generated test-run attachment binaries
+# (e2e attachment suite), never source, never worth committing.
+/uploads-test
 
 # Runtime data
 pids

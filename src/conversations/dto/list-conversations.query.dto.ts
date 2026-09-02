@@ -99,7 +99,12 @@ export class ListConversationsQueryDto {
 
   @ApiPropertyOptional({
     example: 'jane',
-    description: "Substring search over the Visitor's name/email.",
+    // T-11 Test 4 fix (Session Fix-05, PROGRESS.md) — was a substring
+    // (anywhere-in-string) match pre-fix; now a "starts with" prefix match
+    // so the query can use the Visitor.nameLower/emailLower indexes. See
+    // ConversationsService.findMatchingVisitorIds's own doc comment.
+    description:
+      "Prefix (\"starts with\") search over the Visitor's name/email, case-insensitive.",
   })
   @IsOptional()
   @IsString()

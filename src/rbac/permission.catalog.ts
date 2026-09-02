@@ -26,6 +26,7 @@ export const PERMISSION_MODULES = [
   'Visitors',
   'Leads',
   'Analytics',
+  'Shortcuts',
 ] as const;
 
 export type PermissionModule = (typeof PERMISSION_MODULES)[number];
@@ -171,6 +172,64 @@ export const PERMISSION_CATALOG: readonly PermissionDefinition[] = [
     module: 'Analytics',
     description: 'View combined analytics across all Sites in the Organization',
   },
+  // Phase 2, SRS §3.11 (FR-P2-SHORT-01–08) — Shortcuts (Canned Responses).
+  // Four keys, one per scopeLevel a Shortcut can be created at (PERSONAL/
+  // SITE/ORGANIZATION) plus a separate `.view` to actually use them — kept
+  // as four distinct, narrowly-scoped keys per the catalog's own "should
+  // not collapse multiple distinct actions into one key" guidance, exactly
+  // as the SRS's own Section 3.11 "New Permissions" table specifies.
+  {
+    key: 'shortcuts.manage_own',
+    module: 'Shortcuts',
+    description:
+      "Create/edit/delete one's own Personal-level shortcuts (granted to " +
+      'every default Role — Agent through Owner — since anyone should ' +
+      'manage their own)',
+  },
+  {
+    key: 'shortcuts.manage_site',
+    module: 'Shortcuts',
+    description:
+      'Create/edit/delete Site-level shortcuts for a Site (default: ' +
+      'Supervisor and above)',
+  },
+  {
+    key: 'shortcuts.manage_organization',
+    module: 'Shortcuts',
+    description:
+      'Create/edit/delete Organization-level shortcuts (default: Manager ' +
+      'and Owner)',
+  },
+  {
+    key: 'shortcuts.view',
+    module: 'Shortcuts',
+    description:
+      'View/use shortcuts applicable to the caller (their Personal ones + ' +
+      "Site-level ones for Sites they're active on + all Organization-" +
+      'level ones) — granted to every default Role, required simply to ' +
+      'use the feature',
+  },
+  // Business decision, post-QA (T-07-shortcuts.md Finding #1 follow-up),
+  // SRS §3.11 FR-P2-SHORT-09 — Owner/oversight-only read visibility across
+  // EVERY Shortcut in the Organization, including every individual's
+  // Personal ones, with the creator's identity shown. Deliberately separate
+  // from `shortcuts.manage_*` — this is visibility only and grants no
+  // edit/delete rights over a Shortcut the holder didn't create and
+  // doesn't otherwise hold `manage_site`/`manage_organization` over
+  // (ShortcutsService's `assertOwnershipIfPersonal`/`assertCanManageScope`
+  // are untouched by this key's existence). Checked Organization-wide only
+  // (`{ siteSource: 'none' }`, same as `roles.manage`) — "every Shortcut in
+  // the Organization" has no single Site to scope it to.
+  {
+    key: 'shortcuts.view_all',
+    module: 'Shortcuts',
+    description:
+      'Read-only oversight: view every Shortcut that exists in the ' +
+      "Organization, including every individual's Personal ones, with the " +
+      "creator's identity shown. Does not grant edit/delete rights over a " +
+      'Shortcut the viewer didn\'t create and doesn\'t otherwise hold ' +
+      'manage_site/manage_organization over. Default: Owner only.',
+  },
 ] as const;
 
 /** Union type of every valid permission key, derived from the catalog above. */
@@ -195,7 +254,14 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<
   'Owner' | 'Manager' | 'Supervisor' | 'Agent',
   PermissionKey[]
 > = {
-  // Every permission in the catalog, including roles.manage and role_assignments.manage.
+  // Every permission in the catalog, including roles.manage and
+  // role_assignments.manage — this is also how Owner picks up the new
+  // `shortcuts.view_all` oversight key (SRS §3.11 FR-P2-SHORT-09) with no
+  // separate line item needed here: the business decision named "Owner"
+  // only ("Owner/Admin" in its own wording, and Admin has no seeded Role of
+  // its own in this catalog), so Manager/Supervisor/Agent below deliberately
+  // do NOT list `shortcuts.view_all` — confirm with the business before
+  // extending it to Manager by default.
   Owner: [...ALL_PERMISSION_KEYS],
   Manager: [
     'analytics.view_organization',
@@ -203,6 +269,19 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<
     'users.view',
     'leads.view',
     'leads.manage',
+    // Phase 2 §3.11 — every default Role gets manage_own + view; Manager
+    // additionally gets manage_site ("Supervisor and above" — Manager's
+    // default scope, Organization/multiple Sites, is above Supervisor's
+    // one-Site scope in the hierarchy) and manage_organization ("Manager
+    // and Owner"), per this session's task instructions.
+    'shortcuts.manage_own',
+    'shortcuts.view',
+    'shortcuts.manage_site',
+    'shortcuts.manage_organization',
+    // 'shortcuts.view_all' deliberately NOT included — business decision
+    // named "Owner" as the default holder only (see Owner's own comment
+    // above), not Manager, even though Manager already holds every other
+    // Shortcuts key.
   ],
   Supervisor: [
     // 'visitors.view_live_activity' is DELIBERATELY not included here (or
@@ -248,6 +327,11 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<
     'leads.view',
     'leads.manage',
     'analytics.view_site',
+    // Phase 2 §3.11 — every default Role gets manage_own + view; Supervisor
+    // additionally gets manage_site per the SRS §3.11 table's default column.
+    'shortcuts.manage_own',
+    'shortcuts.view',
+    'shortcuts.manage_site',
   ],
   Agent: [
     'conversations.view_own',
@@ -257,5 +341,9 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<
     'visitors.edit',
     'leads.view',
     'leads.manage',
+    // Phase 2 §3.11 — every default Role, Agent through Owner, gets its own
+    // Personal-shortcut management plus the ability to use shortcuts at all.
+    'shortcuts.manage_own',
+    'shortcuts.view',
   ],
 };

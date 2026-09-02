@@ -11,6 +11,7 @@ import { RealtimeEventsModule } from './realtime-events.module';
 import { VisitorPresenceModule } from './visitor-presence.module';
 import { RealtimeGateway } from './realtime.gateway';
 import { WsRateLimiterService } from '../common/rate-limit/ws-rate-limiter.service';
+import { IpVisitorIdentityGuardModule } from '../common/rate-limit/ip-visitor-identity-guard.module';
 
 /**
  * RealtimeModule — Session 8 (FR-MSG-01–06, FR-RTE-01–03, FR-AGT-02/03/04).
@@ -42,6 +43,10 @@ import { WsRateLimiterService } from '../common/rate-limit/ws-rate-limiter.servi
     // `visitorOnline` field.
     PageVisitsModule,
     VisitorPresenceModule,
+    // Session Fix-11 — per-IP multi-session abuse guard (§6.3 business
+    // decision), shared with VisitorSessionModule via this same leaf module
+    // so both resolve one singleton (see its own doc comment).
+    IpVisitorIdentityGuardModule,
   ],
   providers: [RealtimeGateway, WsRateLimiterService],
 })

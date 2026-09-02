@@ -1,7 +1,37 @@
 import { Request } from 'express';
+import type { Socket } from 'socket.io';
 
 /**
- * Resolves the visitor's real client IP from an incoming request.
+ * Shared by `extractClientIp` (Express, below) and `extractSocketIp`
+ * (Socket.IO, below) — same `X-Forwarded-For`/`X-Real-IP` preference order,
+ * just fed from whichever transport's raw headers. Kept as one function so
+ * the two call sites can never silently drift into different proxy-header
+ * handling for what is conceptually the identical "resolve the real client
+ * IP" problem.
+ */
+function resolveForwardedIp(
+  headers: Record<string, string | string[] | undefined>,
+): string | undefined {
+  const forwardedFor = headers['x-forwarded-for'];
+  const forwardedValue = Array.isArray(forwardedFor)
+    ? forwardedFor[0]
+    : forwardedFor;
+  const firstForwarded = forwardedValue?.split(',')[0]?.trim();
+  if (firstForwarded) {
+    return firstForwarded;
+  }
+
+  const realIp = headers['x-real-ip'];
+  const realIpValue = Array.isArray(realIp) ? realIp[0] : realIp;
+  if (realIpValue?.trim()) {
+    return realIpValue.trim();
+  }
+
+  return undefined;
+}
+
+/**
+ * Resolves the visitor's real client IP from an incoming HTTP request.
  *
  * Prefers `X-Forwarded-For` (the first, left-most entry — the original
  * client, per the standard convention — since a reverse proxy/load
@@ -19,25 +49,38 @@ import { Request } from 'express';
  * reverse-proxy/hosting setups that don't set X-Forwarded-For) before the
  * raw socket address — widens which real-world deployments this correctly
  * captures the true client IP behind, which matters beyond display: it's
- * also what `VisitorsService`'s Ban feature bans (`BanVisitorDto`).
+ * also what `VisitorsService`'s Ban feature bans (`BanVisitorDto`), and
+ * (Session Fix-11) what `IpVisitorIdentityGuardService` keys its per-IP
+ * distinct-Visitor-identity tracking on.
  */
 export function extractClientIp(req: Request): string | undefined {
-  const forwardedFor = req.headers['x-forwarded-for'];
-  const forwardedValue = Array.isArray(forwardedFor)
-    ? forwardedFor[0]
-    : forwardedFor;
-  const firstForwarded = forwardedValue?.split(',')[0]?.trim();
-  if (firstForwarded) {
-    return firstForwarded;
-  }
+  return (
+    resolveForwardedIp(
+      req.headers as Record<string, string | string[] | undefined>,
+    ) ??
+    req.ip ??
+    req.socket?.remoteAddress ??
+    undefined
+  );
+}
 
-  const realIp = req.headers['x-real-ip'];
-  const realIpValue = Array.isArray(realIp) ? realIp[0] : realIp;
-  if (realIpValue?.trim()) {
-    return realIpValue.trim();
-  }
-
-  return req.ip ?? req.socket?.remoteAddress ?? undefined;
+/**
+ * Socket.IO counterpart to `extractClientIp` above (Session Fix-11 —
+ * `IpVisitorIdentityGuardService`'s per-IP distinct-Visitor-identity guard).
+ * `visitor:send_message` has no Express `Request` to read — only the
+ * Socket.IO handshake — but a WS connection can sit behind the exact same
+ * reverse proxy an HTTP request does, so the same header preference order
+ * applies, falling back to the raw handshake address (Socket.IO's own
+ * equivalent of `req.socket.remoteAddress`) instead of Express's `req.ip`.
+ */
+export function extractSocketIp(client: Socket): string | undefined {
+  return (
+    resolveForwardedIp(
+      client.handshake.headers as Record<string, string | string[] | undefined>,
+    ) ??
+    client.handshake.address ??
+    undefined
+  );
 }
 
 /**

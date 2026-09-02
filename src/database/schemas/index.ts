@@ -15,6 +15,7 @@ import { AnalyticsEvent, AnalyticsEventSchema } from './analytics-event.schema';
 import { AuditLog, AuditLogSchema } from './audit-log.schema';
 import { Counter, CounterSchema } from './counter.schema';
 import { PageVisit, PageVisitSchema } from './page-visit.schema';
+import { Shortcut, ShortcutSchema } from './shortcut.schema';
 
 export * from './organization.schema';
 export * from './site.schema';
@@ -31,6 +32,7 @@ export * from './analytics-event.schema';
 export * from './audit-log.schema';
 export * from './counter.schema';
 export * from './page-visit.schema';
+export * from './shortcut.schema';
 
 /**
  * All Mongoose model definitions for the app, in one place — passed to
@@ -53,4 +55,5 @@ export const ALL_MODEL_DEFINITIONS: ModelDefinition[] = [
   { name: AuditLog.name, schema: AuditLogSchema },
   { name: Counter.name, schema: CounterSchema },
   { name: PageVisit.name, schema: PageVisitSchema },
+  { name: Shortcut.name, schema: ShortcutSchema },
 ];

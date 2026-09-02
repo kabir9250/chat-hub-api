@@ -3,13 +3,30 @@ import { EventEmitter } from 'events';
 
 import type { ConversationStatus } from '../database/schemas';
 
+/** Phase 2 §2.3/§3.9 (FR-P2-ATT-03/04/07/08) — `body` is nullable (an attachment-only message is valid) and `attachments` carries freshly-signed, short-lived URLs (never a stored/permanent one — see StorageService.getSignedUrl). */
+export interface RealtimeAttachmentPayload {
+  fileName: string;
+  fileType: string;
+  fileSizeBytes: number;
+  url: string;
+  thumbnailUrl: string | null;
+}
+
 export interface RealtimeMessagePayload {
   id: string;
   conversationId: string;
   senderType: 'visitor' | 'agent' | 'system';
   senderId: string | null;
-  body: string;
+  body: string | null;
   sentAt: string;
+  attachments: RealtimeAttachmentPayload[];
+  // Phase 2 §3.10 (FR-P2-READ-01/06) — the tick state an Agent-sent message
+  // is in, carried on EVERY message payload (not just the initial
+  // message:new) so a later delivered/read transition can be pushed to the
+  // Agent Console by re-emitting the same shape (see 'message.updated'
+  // below) — no new WebSocket event type, per SRS §5.2's own instruction.
+  deliveredAt: string | null;
+  readAt: string | null;
 }
 
 export type ConversationChangeType =
@@ -46,6 +63,41 @@ export type RealtimeDomainEvent =
       kind: 'message.created';
       siteId: string;
       conversationId: string;
+      message: RealtimeMessagePayload;
+      // Session Fix-09 (T-06 Findings #2/#3) — carried here (rather than
+      // looked up again inside RealtimeGateway) since every caller of
+      // ConversationsService's private `emitMessageCreated` already has the
+      // Conversation document in hand. `referenceNumber` is always set
+      // (cheap — already on the loaded Conversation doc); `visitorName` is
+      // only populated by the visitor-send path (`addVisitorMessage`, which
+      // already loads the Visitor doc for the banned check) — the two
+      // agent-send paths omit it deliberately (not cheaply available there,
+      // and functionally moot: the desktop-notification consumer of this
+      // event, `useDesktopNotifications.ts`'s `handleUpdated`, only acts on
+      // `data.senderType === 'visitor'` nudges in the first place).
+      referenceNumber: string;
+      visitorName?: string | null;
+    }
+  | {
+      // Phase 2 §3.10 (FR-P2-READ-02–06) — a previously-created message's
+      // `deliveredAt`/`readAt` just advanced (Visitor reconnected and picked
+      // up a pending Sent message, or the Visitor's widget reported
+      // conversation-foreground and one or more Delivered messages became
+      // Read). Deliberately reuses `RealtimeMessagePayload` — the SAME shape
+      // `message.created` broadcasts — and RealtimeGateway re-emits it on
+      // the exact same `message:new` Socket.IO event (see its own doc
+      // comment) rather than a new event name, so the Agent Console's
+      // existing `message:new` listener just needs to upsert-by-id instead
+      // of only-append. `visitorId` is carried so the gateway can exclude
+      // the Visitor's OWN socket from this broadcast (`.except(visitorRoom(...))`)
+      // — a tick-only update is never useful to the Widget (FR-P2-READ-07:
+      // Agent-side only) and re-delivering it there would wrongly re-trigger
+      // the Widget's own message:new side effects (unread badge/notification
+      // sound) for a message it already has.
+      kind: 'message.updated';
+      siteId: string;
+      conversationId: string;
+      visitorId: string;
       message: RealtimeMessagePayload;
     }
   | {

@@ -27,6 +27,7 @@ import { LeadsModule } from '../leads/leads.module';
 import { PresenceModule } from '../realtime/presence.module';
 import { RealtimeEventsModule } from '../realtime/realtime-events.module';
 import { VisitorPresenceModule } from '../realtime/visitor-presence.module';
+import { StorageModule } from '../storage/storage.module';
 import { ConversationsController } from './conversations.controller';
 import { CombinedConversationsController } from './combined-conversations.controller';
 import { ConversationsService } from './conversations.service';
@@ -67,6 +68,13 @@ import { ReferenceNumberService } from './reference-number.service';
     // startProactiveConversation() alike). No cycle (AnalyticsModule
     // doesn't import this module back).
     AnalyticsModule,
+    // Phase 2 §3.9 (FR-P2-ATT-08) — message serialization signs a fresh
+    // attachments[].url/thumbnailUrl on every read; StorageService lives
+    // here, not in AttachmentsModule, precisely so this import direction
+    // works (AttachmentsModule imports ConversationsModule for its own
+    // permission checks — see that module's doc comment — so the reverse
+    // import would be circular).
+    StorageModule,
   ],
   controllers: [ConversationsController, CombinedConversationsController],
   providers: [ConversationsService, ReferenceNumberService],

@@ -41,6 +41,9 @@ export interface PublicWidgetConfig {
   notificationSoundEnabled: boolean;
   satisfactionRatingsEnabled: boolean;
   offlineFormEnabled: boolean;
+  attachmentsEnabled: boolean;
+  /** Phase 2 §3.12 (FR-P2-FORM-01–04) — whole pre-chat-form on/off switch. */
+  preChatFormEnabled: boolean;
   preChatFormFields: PublicFormField[];
   offlineFormFields: PublicFormField[];
 }
@@ -246,6 +249,8 @@ export class WidgetBootstrapService {
         notificationSoundEnabled: true,
         satisfactionRatingsEnabled: true,
         offlineFormEnabled: true,
+        attachmentsEnabled: true,
+        preChatFormEnabled: true,
         preChatFormFields: this.toPublicFormFields(defaultPreChatFormFields()),
         offlineFormFields: this.toPublicFormFields(defaultOfflineFormFields()),
       };
@@ -265,6 +270,8 @@ export class WidgetBootstrapService {
       notificationSoundEnabled: config.notificationSoundEnabled,
       satisfactionRatingsEnabled: config.satisfactionRatingsEnabled,
       offlineFormEnabled: config.offlineFormEnabled,
+      attachmentsEnabled: config.attachmentsEnabled,
+      preChatFormEnabled: config.preChatFormEnabled,
       preChatFormFields: this.toPublicFormFields(config.preChatFormFields),
       offlineFormFields: this.toPublicFormFields(config.offlineFormFields),
     };

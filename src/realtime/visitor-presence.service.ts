@@ -30,11 +30,22 @@ import { Injectable } from '@nestjs/common';
  * restart drops presence, which is acceptable for the same reasons already
  * documented for PresenceService (re-established on the next heartbeat/
  * reconnect, never a source of truth for anything persisted).
+ *
+ * Phase 2 §3.10 (FR-P2-READ-03) addition — `foregroundConversation` tracks,
+ * per Visitor, WHICH Conversation (if any) their widget currently reports as
+ * "open + tab in the foreground" (the Page Visibility API signal the widget
+ * emits over its existing socket — see RealtimeGateway's
+ * `visitor:conversation_foreground` handler). Same in-memory, no-DB posture
+ * as the connection-tracking above: this is live "is anyone looking at this
+ * right now" state, never a source of truth for anything persisted (`readAt`
+ * itself IS the persisted fact, written once via ConversationsService when
+ * this flips true).
  */
 @Injectable()
 export class VisitorPresenceService {
   private readonly connections = new Map<string, Set<string>>();
   private readonly siteByVisitor = new Map<string, string>();
+  private readonly foregroundConversation = new Map<string, string>();
 
   /**
    * Registers a new socket for this Visitor. Returns `true` only when this
@@ -73,12 +84,43 @@ export class VisitorPresenceService {
     if (wentOffline) {
       this.connections.delete(visitorId);
       this.siteByVisitor.delete(visitorId);
+      // FR-P2-READ-05 note: dropping the foreground flag here does NOT
+      // regress any already-Delivered/Read message — it only stops a FUTURE
+      // message from being auto-marked-read on arrival until the widget
+      // explicitly reports foreground again after reconnecting (matches the
+      // "gone from site" posture of the connection map itself, just for the
+      // narrower foreground signal).
+      this.foregroundConversation.delete(visitorId);
     }
     return siteId ? { siteId, wentOffline } : null;
   }
 
   isConnected(visitorId: string): boolean {
     return (this.connections.get(visitorId)?.size ?? 0) > 0;
+  }
+
+  /**
+   * Records the widget's own foreground/backgrounded report for ONE
+   * Conversation (a Visitor only ever has one active Conversation open in
+   * their widget at a time). `foreground: false` clears the flag ONLY if it
+   * was set for this exact conversationId — a stale "left" for a
+   * conversation the Visitor already navigated away from must never clobber
+   * a newer "entered" for a different one.
+   */
+  setForeground(
+    visitorId: string,
+    conversationId: string,
+    foreground: boolean,
+  ): void {
+    if (foreground) {
+      this.foregroundConversation.set(visitorId, conversationId);
+    } else if (this.foregroundConversation.get(visitorId) === conversationId) {
+      this.foregroundConversation.delete(visitorId);
+    }
+  }
+
+  isForeground(visitorId: string, conversationId: string): boolean {
+    return this.foregroundConversation.get(visitorId) === conversationId;
   }
 
   /** Every Visitor with at least one live socket on the given Site, right now. */

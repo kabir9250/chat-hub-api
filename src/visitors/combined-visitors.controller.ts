@@ -56,4 +56,19 @@ export class CombinedVisitorsController {
     }
     return this.visitorsService.findAllCombined(user, query);
   }
+
+  @ApiOperation({
+    summary:
+      'List currently-online Visitors across every authorized Site — "All Sites" mode (FR-P2-SITE-01–04/FR-RPT-07, visitors.view)',
+    description:
+      'Same currently-online definition as GET /sites/:siteId/visitors/live, merged ' +
+      "across every Site the caller's effective visitors.view permission covers. " +
+      "Registered before this controller has any ':id'-shaped route (it has none), " +
+      "so there is no risk of the literal 'live' segment colliding with one.",
+  })
+  @Get('live')
+  @RequirePermission('visitors.view', { siteSource: 'any' })
+  findLiveCombined(@CurrentUser() user: AuthenticatedUser) {
+    return this.visitorsService.findLiveCombined(user);
+  }
 }

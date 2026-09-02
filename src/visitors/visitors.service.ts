@@ -47,6 +47,10 @@ export interface CombinedVisitorListResult extends VisitorListResult {
 
 export interface LiveVisitor {
   visitorId: string;
+  /** Phase 2, FR-P2-SITE-03 — always populated (single-Site call already
+   * knows it, combined mode's whole point is badging by it) so the frontend
+   * never needs a separate lookup either way. */
+  siteId: string;
   name: string | null;
   email: string | null;
   currentPage: string | null;
@@ -109,17 +113,62 @@ export class VisitorsService {
     siteId: string,
   ): Promise<LiveVisitor[]> {
     const site = await this.assertSite(actor, siteId);
+    return this.buildLiveVisitorsForSite(site._id);
+  }
 
-    const onlineIds = this.visitorPresenceService.getOnlineVisitorIds(
-      site._id.toString(),
+  /**
+   * Phase 2, FR-P2-SITE-01–04 — `GET /visitors/live?combined=true`. Same
+   * "currently-online" definition as `findLive` (FR-RPT-07), merged across
+   * every Site the caller holds `visitors.view` on, resolved server-side via
+   * `PermissionsService.getAuthorizedSites` (never a client-supplied Site
+   * list — this task's own guardrail, same as `findAllCombined` above).
+   * Queried per-Site in parallel (`VisitorPresenceService`'s online-id set is
+   * already Site-scoped) then merged/sorted by `lastSeenAt` descending across
+   * the whole set, matching `findAllCombined`'s own merge rule.
+   */
+  async findLiveCombined(actor: AuthenticatedUser): Promise<{
+    items: LiveVisitor[];
+    siteIds: string[];
+  }> {
+    const authorizedSites = await this.permissionsService.getAuthorizedSites(
+      actor.userId,
+      ['visitors.view'],
     );
+    const siteIds = authorizedSites.map((s) => s.siteId);
+
+    const perSite = await Promise.all(
+      siteIds.map((id) =>
+        this.buildLiveVisitorsForSite(new Types.ObjectId(id)),
+      ),
+    );
+    const items = perSite
+      .flat()
+      .sort((a, b) => (a.lastSeenAt < b.lastSeenAt ? 1 : -1));
+
+    return { items, siteIds };
+  }
+
+  /** Shared by `findLive`/`findLiveCombined` — everyone currently online on
+   * ONE already-authorized Site. Never called with an unchecked `siteId`;
+   * both callers resolve/authorize the Site first (`assertSite`, or
+   * `getAuthorizedSites` itself only ever names Sites the caller holds
+   * `visitors.view` on). */
+  private async buildLiveVisitorsForSite(
+    siteObjectId: Types.ObjectId,
+  ): Promise<LiveVisitor[]> {
+    const siteId = siteObjectId.toString();
+    const onlineIds = this.visitorPresenceService.getOnlineVisitorIds(siteId);
     if (onlineIds.length === 0) return [];
 
     const objectIds = onlineIds.map((id) => new Types.ObjectId(id));
 
     const [visitors, openPageVisits, activeConversations] = await Promise.all([
       this.visitorModel
-        .find({ _id: { $in: objectIds }, siteId: site._id, isBanned: false })
+        .find({
+          _id: { $in: objectIds },
+          siteId: siteObjectId,
+          isBanned: false,
+        })
         .lean()
         .exec(),
       this.pageVisitModel
@@ -129,7 +178,7 @@ export class VisitorsService {
       this.conversationModel
         .find({
           visitorId: { $in: objectIds },
-          siteId: site._id,
+          siteId: siteObjectId,
           status: { $ne: 'closed' },
         })
         .sort({ startedAt: -1 })
@@ -157,6 +206,7 @@ export class VisitorsService {
       const activeConversationId = conversationByVisitor.get(v._id.toString());
       return {
         visitorId: v._id.toString(),
+        siteId,
         name: v.name ?? null,
         email: v.email ?? null,
         currentPage: page?.pageUrl ?? null,

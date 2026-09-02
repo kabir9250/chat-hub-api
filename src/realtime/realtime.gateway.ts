@@ -25,30 +25,57 @@ import { RequirePermission } from '../rbac/decorators/require-permission.decorat
 import { PermissionsService } from '../rbac/permissions.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { PageVisitsService } from '../page-visits/page-visits.service';
+import type { AttachmentRefInput } from '../storage/attachment.types';
 import { PresenceService, PresenceStatus } from './presence.service';
 import { RealtimeEventsService } from './realtime-events.service';
 import { VisitorPresenceService } from './visitor-presence.service';
 import { WsRateLimiterService } from '../common/rate-limit/ws-rate-limiter.service';
+import {
+  IpVisitorIdentityGuardService,
+  TOO_MANY_ACTIVE_SESSIONS_MESSAGE,
+} from '../common/rate-limit/ip-visitor-identity-guard.service';
+import { extractSocketIp } from '../attribution/extract-client-ip.util';
 import { CONVERSATION_VIEW_PERMISSIONS } from '../conversations/conversations.constants';
 import {
   agentRoom,
   conversationRoom,
   RealtimeSocketData,
+  siteAlertRoom,
   siteRoom,
   visitorRoom,
 } from './realtime.types';
 
 const VIEW_PERMISSIONS = CONVERSATION_VIEW_PERMISSIONS;
 
-// §6.3 "Rate limiting on ... message sending" — same limit for both sides
-// of a conversation (30 messages/minute is generous for a human typing, but
-// stops a scripted flood). See WsRateLimiterService's doc comment for why
-// this is a small in-memory limiter rather than @nestjs/throttler (HTTP-only).
-const MESSAGE_SEND_LIMIT = 30;
+// §6.3 "Rate limiting on ... message sending" — per-identity message-volume
+// cap, independent for each side of a conversation. See
+// WsRateLimiterService's doc comment for why this is a small in-memory
+// limiter rather than @nestjs/throttler (HTTP-only).
+//
+// Session Fix-11 (§6.3 business decision, PROGRESS.md) split what used to
+// be one shared 30/min constant into two: the Agent cap is UNCHANGED
+// (T-11-load.md Test 1 Finding #5 flagged the per-userId Agent cap as a
+// separate capacity-planning question for the business, not something this
+// session was asked to change). The Visitor cap was explicitly raised to
+// 50/min — generous enough that a genuine single person typing quickly,
+// even bursting 15-20 messages, is never blocked by it; real abuse
+// protection against many DISTINCT visitor identities from one IP is now
+// `IpVisitorIdentityGuardService`'s job below, a fully independent limiter.
+const AGENT_MESSAGE_SEND_LIMIT = 30;
+const VISITOR_MESSAGE_SEND_LIMIT = 50;
 const MESSAGE_SEND_WINDOW_MS = 60_000;
 const RATE_LIMIT_ERROR = {
   event: 'error',
   data: { message: 'Too many messages sent — please slow down.' },
+} as const;
+// Session Fix-11 — IpVisitorIdentityGuardService's rejection, surfaced as
+// its own clear WS error event (never a silent drop), distinct from
+// RATE_LIMIT_ERROR above since this is a different limiter for a different
+// reason (too many DISTINCT identities from one IP, not one identity
+// sending too fast).
+const IP_IDENTITY_LIMIT_ERROR = {
+  event: 'error',
+  data: { message: TOO_MANY_ACTIVE_SESSIONS_MESSAGE },
 } as const;
 
 /**
@@ -70,6 +97,13 @@ const RATE_LIMIT_ERROR = {
  * `visitor:send_message`) is rate-limited via `WsRateLimiterService` (§6.3) —
  * see that service's doc comment for why this is a separate, small in-memory
  * limiter rather than reusing `@nestjs/throttler` (HTTP-only).
+ *
+ * Session Fix-11 addition: `visitor:send_message` additionally goes through
+ * `IpVisitorIdentityGuardService` — a SECOND, fully independent limiter (not
+ * a shared counter with the cap above) that only rejects the (N+1)th
+ * DISTINCT Visitor identity active from one IP within a rolling window,
+ * never a single identity's own message volume. See that service's doc
+ * comment and PROGRESS.md (Session Fix-11) for the full design rationale.
  *
  * Rooms (see realtime.types.ts for the name-builders):
  *   - `site:<siteId>`         — every connected User holding
@@ -135,6 +169,7 @@ export class RealtimeGateway
     private readonly pageVisitsService: PageVisitsService,
     private readonly visitorPresenceService: VisitorPresenceService,
     private readonly wsRateLimiter: WsRateLimiterService,
+    private readonly ipVisitorIdentityGuard: IpVisitorIdentityGuardService,
   ) {}
 
   afterInit() {
@@ -186,14 +221,42 @@ export class RealtimeGateway
           // from an agent's own outgoing one without a second round-trip —
           // needed so the Inbox's new-message alert sound doesn't fire on
           // an agent's own sends.
-          this.server.to(siteRoom(event.siteId)).emit('conversation:updated', {
+          //
+          // Session Fix-09 (T-06 Findings #2/#3): also carries
+          // `referenceNumber` + the Visitor's name (if known) — the same
+          // fields `conversation:new`/`conversation:assigned` already send
+          // — so `useDesktopNotifications.ts`'s `resolveTitle` can show the
+          // real FR-P2-ID-01 name-or-reference-number label for a
+          // message-received notification even when no floating window has
+          // ever been opened for this Conversation this session, instead of
+          // falling back to the raw Mongo id. `data.bodyPreview`/
+          // `.hasAttachments` similarly let the notification body
+          // distinguish a text message from an attachment-only one
+          // (FR-P2-ATT-07). `bodyPreview` is deliberately TRUNCATED
+          // (`truncateForNotification`, never the full body) — this event
+          // still fans out to the whole Site room, not just whoever has
+          // this Conversation open, so it stays the same "lightweight
+          // nudge" it always was.
+          //
+          // This session's addition — targets `siteAlertRoom`, not
+          // `siteRoom`: business decision, the "new message" ALERT SOUND
+          // (Inbox.tsx's `onUpdated` handler below) must reach every
+          // Agent/Supervisor/Owner by default, not just `view_site`
+          // holders (see `siteAlertRoom`'s doc comment). Every `siteRoom`
+          // member is also a `siteAlertRoom` member, so this single target
+          // still reaches exactly who it always did, plus everyone new.
+          this.server.to(siteAlertRoom(event.siteId)).emit('conversation:updated', {
             kind: 'conversation.updated',
             siteId: event.siteId,
             conversationId: event.conversationId,
             changeType: 'message',
+            referenceNumber: event.referenceNumber,
+            visitor: { name: event.visitorName ?? null },
             data: {
               messageId: event.message.id,
               senderType: event.message.senderType,
+              bodyPreview: this.truncateForNotification(event.message.body),
+              hasAttachments: event.message.attachments.length > 0,
             },
           });
           break;
@@ -232,6 +295,23 @@ export class RealtimeGateway
             .emit('visitor.profileUpdated', event);
           break;
 
+        // Phase 2 §3.10 (FR-P2-READ-02–06) — a message's deliveredAt/readAt
+        // just advanced. Reuses the SAME `message:new` client event
+        // `message.created` above already broadcasts (SRS §5.2: "no new
+        // event type") — the Agent Console's listener upserts by id, so
+        // this just refreshes the tick icons on an already-rendered
+        // message. `.except(visitorRoom(...))` keeps this OFF the Visitor's
+        // own socket(s): the Widget shows no read-receipt UI at all
+        // (FR-P2-READ-07), and re-delivering `message:new` there would
+        // wrongly re-trigger ITS OWN unread-badge/notification-sound side
+        // effects for a message it already has.
+        case 'message.updated':
+          this.server
+            .to(conversationRoom(event.conversationId))
+            .except(visitorRoom(event.visitorId))
+            .emit('message:new', event.message);
+          break;
+
         case 'agent.proactiveMessage':
           // FR-RPT-07 fix — broadcast to the Visitor's PERSONAL room, not
           // the Conversation room. The original "Send anyway" case (an
@@ -256,9 +336,15 @@ export class RealtimeGateway
         // conversation.created/visitor.online — no new permission, just
         // ordinary Site-room membership (conversations.view_site holders
         // already auto-joined it on connect).
+        // This session's addition — retargeted from `siteRoom` to
+        // `siteAlertRoom` (business decision, see that room's doc
+        // comment): "currently on: /pricing" for the live Visitors list is
+        // ambient site-presence info, not Conversation content, so it's
+        // available to every Agent/Supervisor/Owner by default too, not
+        // just `view_site` holders.
         case 'visitor.siteActivity':
           this.server
-            .to(siteRoom(event.siteId))
+            .to(siteAlertRoom(event.siteId))
             .emit('visitor.siteActivity', event);
           break;
       }
@@ -292,6 +378,11 @@ export class RealtimeGateway
         siteId: payload.siteId,
       };
       (client.data as RealtimeSocketData).visitor = visitor;
+      // Session Fix-11 — resolved once here (not re-derived per message;
+      // see RealtimeSocketData's own doc comment) for
+      // IpVisitorIdentityGuardService's per-IP distinct-identity check on
+      // visitor:send_message below.
+      (client.data as RealtimeSocketData).clientIp = extractSocketIp(client);
       // FR-RPT-07 fix — every Visitor socket joins its own personal room
       // unconditionally (mirrors `agentRoom` for Users), independent of
       // which specific Conversation room(s) it later joins. Needed because
@@ -314,7 +405,12 @@ export class RealtimeGateway
       // already uses (auto-joined by connectAsUser above for any User
       // holding conversations.view_site).
       if (wentOnline) {
-        this.server.to(siteRoom(visitor.siteId)).emit('visitor.online', {
+        // This session's addition — retargeted from `siteRoom` to
+        // `siteAlertRoom` (business decision: "visitor arrived" alert
+        // sound must work by default for every Agent/Supervisor/Owner, not
+        // only `conversations.view_site` holders — see that room's doc
+        // comment).
+        this.server.to(siteAlertRoom(visitor.siteId)).emit('visitor.online', {
           siteId: visitor.siteId,
           visitorId: visitor.visitorId,
           timestamp: new Date().toISOString(),
@@ -378,6 +474,12 @@ export class RealtimeGateway
         await client.join(siteRoom(siteId));
         joinedSiteIds.push(siteId);
       }
+      // This session's addition — EVERY Site this User has any role
+      // assignment on (Agent's `view_own` included) joins the alert room,
+      // unconditionally: see `siteAlertRoom`'s doc comment for why this
+      // one is deliberately not gated behind `view_site` the way the room
+      // above is.
+      await client.join(siteAlertRoom(siteId));
     }
 
     this.broadcastPresence(
@@ -422,11 +524,33 @@ export class RealtimeGateway
         client.id,
       );
       if (result?.wentOffline) {
-        this.server.to(siteRoom(result.siteId)).emit('visitor.offline', {
+        // Same `siteAlertRoom` retarget as the `visitor.online` emit above
+        // — keep the pair symmetric.
+        this.server.to(siteAlertRoom(result.siteId)).emit('visitor.offline', {
           siteId: result.siteId,
           visitorId: data.visitor.visitorId,
           timestamp: new Date().toISOString(),
         });
+        // T-05 TC-05.3b fix — SRS §4.4a lists "closes the tab" as one of
+        // PageVisit's three closing triggers; `wentOffline` (zero
+        // connections remaining, just computed above by
+        // VisitorPresenceService) is exactly that signal, already
+        // available at this call site — no separate disconnect-detection
+        // needed. See PageVisitsService.closeOpenPageVisitOnDisconnect's
+        // own doc comment for the closing/capping logic (shared with the
+        // navigate-away path) and for why this can't double-close a
+        // PageVisit a racing page-change already closed. Best-effort: a
+        // failure here must never block the rest of disconnect handling —
+        // the presence broadcast above has already gone out regardless.
+        try {
+          await this.pageVisitsService.closeOpenPageVisitOnDisconnect(
+            data.visitor.visitorId,
+          );
+        } catch (err) {
+          this.logger.warn(
+            `Failed to close out PageVisit on visitor disconnect: ${(err as Error).message}`,
+          );
+        }
       }
       this.logger.log(
         `Visitor ${data.visitor.visitorId} disconnected (${client.id})`,
@@ -457,6 +581,26 @@ export class RealtimeGateway
     // future listener, without the crash.
     client.emit('auth_error', { message });
     client.disconnect(true);
+  }
+
+  /**
+   * Session Fix-09 (T-06 Findings #2/#3) — a short, desktop-notification-
+   * sized preview of a message body for the `message.created` case's
+   * `conversation:updated` nudge above. Deliberately truncated rather than
+   * passing the full body through: that broadcast still fans out to the
+   * whole Site room (task guardrail — keep the notification reasonably
+   * short, it's an OS notification, not a transcript preview). `null`/empty
+   * body (an attachment-only message, FR-P2-ATT-07) passes through as
+   * `null` so the frontend can tell "no text" apart from "text that happens
+   * to be short" and fall back to its own "sent an attachment" copy.
+   */
+  private truncateForNotification(body: string | null): string | null {
+    const trimmed = body?.trim();
+    if (!trimmed) return null;
+    const maxLength = 80;
+    return trimmed.length > maxLength
+      ? `${trimmed.slice(0, maxLength)}…`
+      : trimmed;
   }
 
   private extractToken(client: Socket): string | undefined {
@@ -548,6 +692,11 @@ export class RealtimeGateway
         await client.join(siteRoom(site.siteId));
         siteRoomsJoined.push(site.siteId);
       }
+      // Same unconditional alert-room join as `connectAsUser` — every Site
+      // this call resolved at all (view_own included) gets the "visitor
+      // arrived"/"new message" alert sounds by default. See
+      // `siteAlertRoom`'s doc comment.
+      await client.join(siteAlertRoom(site.siteId));
     }
 
     return {
@@ -637,16 +786,28 @@ export class RealtimeGateway
   async handleAgentSendMessage(
     @ConnectedSocket() client: Socket,
     @MessageBody()
-    data: { siteId: string; conversationId: string; body: string },
+    data: {
+      siteId: string;
+      conversationId: string;
+      body?: string;
+      // Phase 2 §3.9 (FR-P2-ATT-01/06/07) — attachments already uploaded via
+      // POST .../attachments a moment earlier; see AttachmentRefDto.
+      attachments?: AttachmentRefInput[];
+    },
   ) {
     const { user } = client.data as RealtimeSocketData;
-    if (!data?.body?.trim()) {
-      return { event: 'error', data: { message: 'body is required.' } };
+    if (!data?.body?.trim() && !data?.attachments?.length) {
+      return {
+        event: 'error',
+        data: {
+          message: 'A message must include text or at least one attachment.',
+        },
+      };
     }
     if (
       !this.wsRateLimiter.consume(
         `agent:send_message:${user!.userId}`,
-        MESSAGE_SEND_LIMIT,
+        AGENT_MESSAGE_SEND_LIMIT,
         MESSAGE_SEND_WINDOW_MS,
       )
     ) {
@@ -658,6 +819,7 @@ export class RealtimeGateway
         data.siteId,
         data.conversationId,
         data.body,
+        data.attachments,
       );
       return {
         event: 'message_sent',
@@ -693,7 +855,7 @@ export class RealtimeGateway
     if (
       !this.wsRateLimiter.consume(
         `agent:send_message:${user!.userId}`,
-        MESSAGE_SEND_LIMIT,
+        AGENT_MESSAGE_SEND_LIMIT,
         MESSAGE_SEND_WINDOW_MS,
       )
     ) {
@@ -741,7 +903,7 @@ export class RealtimeGateway
     if (
       !this.wsRateLimiter.consume(
         `agent:send_message:${user!.userId}`,
-        MESSAGE_SEND_LIMIT,
+        AGENT_MESSAGE_SEND_LIMIT,
         MESSAGE_SEND_WINDOW_MS,
       )
     ) {
@@ -863,26 +1025,53 @@ export class RealtimeGateway
   @UseGuards(WsVisitorGuard)
   async handleVisitorSendMessage(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { conversationId: string; body: string },
+    @MessageBody()
+    data: {
+      conversationId: string;
+      body?: string;
+      // Phase 2 §3.9 (FR-P2-ATT-02/06/07).
+      attachments?: AttachmentRefInput[];
+    },
   ) {
     const { visitor } = client.data as RealtimeSocketData;
-    if (!data?.body?.trim()) {
-      return { event: 'error', data: { message: 'body is required.' } };
+    if (!data?.body?.trim() && !data?.attachments?.length) {
+      return {
+        event: 'error',
+        data: {
+          message: 'A message must include text or at least one attachment.',
+        },
+      };
     }
     if (
       !this.wsRateLimiter.consume(
         `visitor:send_message:${visitor!.visitorId}`,
-        MESSAGE_SEND_LIMIT,
+        VISITOR_MESSAGE_SEND_LIMIT,
         MESSAGE_SEND_WINDOW_MS,
       )
     ) {
       return RATE_LIMIT_ERROR;
+    }
+    // Session Fix-11 (§6.3 business decision) — SEPARATE, independent
+    // limiter from the per-Visitor-identity cap just above: this one only
+    // cares how many DIFFERENT Visitor identities have been active from
+    // this socket's IP within the rolling window, not this identity's own
+    // message volume (which the check above already governs on its own).
+    // See IpVisitorIdentityGuardService's doc comment for the full design.
+    const { clientIp } = client.data as RealtimeSocketData;
+    if (
+      !this.ipVisitorIdentityGuard.checkAndRegister(
+        clientIp,
+        visitor!.visitorId,
+      )
+    ) {
+      return IP_IDENTITY_LIMIT_ERROR;
     }
     try {
       const message = await this.conversationsService.addVisitorMessage(
         visitor!,
         data.conversationId,
         data.body,
+        data.attachments,
       );
       return {
         event: 'message_sent',
@@ -938,6 +1127,56 @@ export class RealtimeGateway
         pageUrl: data.pageUrl,
       });
       return { event: 'page_change_recorded', data: {} };
+    } catch (err) {
+      return { event: 'error', data: { message: (err as Error).message } };
+    }
+  }
+
+  /**
+   * Phase 2 §3.10 (FR-P2-READ-03) — the widget's "conversation foreground"
+   * signal (open + tab in the foreground, per the Page Visibility API),
+   * piggybacked on this existing connection rather than a new channel (SRS
+   * §5.2 leaves the exact implementation to engineering; PROGRESS.md notes
+   * the choice). No PermissionGuard — same posture as every other
+   * `visitor:*` handler — `assertVisitorConversationAccess` (inside
+   * `setConversationForeground`) re-verifies this Conversation actually
+   * belongs to the caller's own verified visitor session before touching
+   * anything.
+   *
+   * On `foreground: true`, `ConversationsService.setConversationForeground`
+   * both records the flag (for the NEXT agent-sent message to arrive
+   * already-Read, per `addAgentMessage`'s own check) and immediately marks
+   * every currently-delivered, unread message in this Conversation as read
+   * right now — covering the "was already foregrounded when the message
+   * arrived" case too, since sending a fresh foreground:true is not the only
+   * moment a message can appear.
+   */
+  @SubscribeMessage('visitor:conversation_foreground')
+  @UseGuards(WsVisitorGuard)
+  async handleVisitorConversationForeground(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { conversationId: string; foreground: boolean },
+  ) {
+    const { visitor } = client.data as RealtimeSocketData;
+    if (!data?.conversationId) {
+      return {
+        event: 'error',
+        data: { message: 'conversationId is required.' },
+      };
+    }
+    try {
+      await this.conversationsService.setConversationForeground(
+        visitor!,
+        data.conversationId,
+        !!data.foreground,
+      );
+      return {
+        event: 'conversation_foreground_ack',
+        data: {
+          conversationId: data.conversationId,
+          foreground: !!data.foreground,
+        },
+      };
     } catch (err) {
       return { event: 'error', data: { message: (err as Error).message } };
     }
