@@ -1,5 +1,11 @@
 import { ApiPropertyOptional, ApiProperty } from '@nestjs/swagger';
-import { IsMongoId, IsOptional, IsString, IsUrl } from 'class-validator';
+import {
+  IsMongoId,
+  IsOptional,
+  IsString,
+  IsUrl,
+  MaxLength,
+} from 'class-validator';
 
 export class InitVisitorSessionDto {
   @ApiProperty({
@@ -54,4 +60,28 @@ export class InitVisitorSessionDto {
   @IsOptional()
   @IsString()
   referrer?: string;
+
+  // Direct user feedback — "a new visit" should mean "the visitor closed
+  // and reopened the tab," not "30+ minutes passed," and should NOT reset
+  // just because the visitor left the tab open and browsed elsewhere for a
+  // while. The widget generates this from `sessionStorage` (cleared only on
+  // tab/window close, unlike the `localStorage`-persisted session token —
+  // see `widget/storage.ts`'s `getOrCreateVisitSessionId`), so its value is
+  // stable for the whole lifetime of one browser tab and changes only on a
+  // genuinely fresh tab. Optional/best-effort: an older cached widget
+  // bundle or a non-browser caller (e.g. this project's own e2e tests) that
+  // sends none of this falls back to the previous 30-minute-gap heuristic
+  // (`PageVisitsService.isNewVisit`) — see `VisitorSessionService.init()`.
+  @ApiPropertyOptional({
+    example: 'b6e4a1d2-9c3f-4e2a-8f1a-2d6c7b9e0f11',
+    description:
+      "A per-tab id the widget generates via sessionStorage, stable for the " +
+      'tab\'s lifetime and different on every fresh tab. Used to decide ' +
+      '"new visit" by tab-close instead of a time gap; omit for the old ' +
+      'gap-based behavior.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  visitSessionId?: string;
 }

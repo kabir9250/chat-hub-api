@@ -95,6 +95,19 @@ export class PageVisit {
    * here so a past visit's attribution chip doesn't need to be re-derived. */
   @Prop({ type: String, default: null })
   visitorPathLabel!: string | null;
+
+  // Direct user feedback — "a new visit" means the browser tab was closed
+  // and reopened, not "30+ minutes of inactivity passed" (matches Zendesk's
+  // own definition). The widget generates one id per tab lifetime via
+  // `sessionStorage` (`widget/storage.ts`'s `getOrCreateVisitSessionId`) and
+  // sends it on every `init()`/page-change call; `current-visit.util.ts`'s
+  // `groupIntoVisits` groups consecutive rows sharing this id as one visit
+  // session instead of using the old 30-minute-gap heuristic. Nullable and
+  // backward-compatible: `null` on every row written before this field
+  // existed (and on any row from a caller that doesn't send one), which
+  // `groupIntoVisits` falls back to the old gap-based grouping for.
+  @Prop({ type: String, default: null })
+  visitSessionId!: string | null;
 }
 
 export type PageVisitDocument = PageVisit & Document;

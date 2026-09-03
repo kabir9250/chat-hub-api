@@ -447,22 +447,61 @@ export class ConversationsService {
     if (query.dateFrom) startedAtRange.$gte = new Date(query.dateFrom);
     if (query.dateTo) startedAtRange.$lte = new Date(query.dateTo);
 
-    // Session P2-5 redesign (direct user feedback) — "Past chats" is now
-    // relative to whichever Conversation the agent is currently looking at,
-    // not a flat "every other Conversation" list: only Conversations that
-    // started strictly BEFORE `beforeConversationId`'s own `startedAt`
-    // count. Resolved server-side from the referenced Conversation's own
-    // record (never a client-supplied timestamp) — same posture every other
+    // Session P2-5 redesign (direct user feedback) — "Past chats" is
+    // relative to whichever Conversation the agent is currently looking at.
+    // Resolved server-side from the referenced Conversation's own record
+    // (never a client-supplied timestamp) — same posture every other
     // server-resolved boundary in this codebase takes. A bad/foreign id is
     // silently ignored (falls back to no bound) rather than erroring — this
     // filter is additive UI sugar, not a security boundary.
+    //
+    // Fix (direct user feedback, live QA screenshot: "Past visits: 0, Past
+    // chats: 1" for a Visitor with only 2 Conversations 8 minutes apart) —
+    // this used to be a bare `startedAt < ref.startedAt`, which counts ANY
+    // earlier Conversation as "past" even one that happened minutes ago in
+    // the exact same, still-ongoing browsing session. Meanwhile "Past
+    // visits" (`VisitorsService.findVisits`) already deliberately excludes
+    // that same current visit session via `computeVisitorPathLowerBound` —
+    // so the two badges disagreed on whether a same-session earlier chat
+    // counts as "past" at all. Now uses the exact same boundary
+    // `computeConversationPath`/`findVisits` compute for "which visit
+    // session does this Conversation belong to" (reused, not re-derived):
+    // only a Conversation that started strictly before THAT boundary — i.e.
+    // genuinely in an earlier visit, not just an earlier message in this
+    // one — counts as a past chat. This makes "Past chats" and "Past
+    // visits" agree by construction.
     if (query.beforeConversationId) {
       const ref = await this.conversationModel
         .findOne({ _id: query.beforeConversationId, siteId: site._id })
-        .select('startedAt')
+        .select('startedAt visitorId')
         .lean()
         .exec();
-      if (ref) startedAtRange.$lt = ref.startedAt;
+      if (ref) {
+        const [previousConversation, recentDesc] = await Promise.all([
+          this.conversationModel
+            .findOne({
+              visitorId: ref.visitorId,
+              startedAt: { $lt: ref.startedAt },
+            })
+            .sort({ startedAt: -1 })
+            .select('startedAt')
+            .lean()
+            .exec(),
+          this.pageVisitModel
+            .find({ visitorId: ref.visitorId })
+            .sort({ enteredAt: -1 })
+            .limit(VISIT_HISTORY_LOOKBACK)
+            .lean()
+            .exec(),
+        ]);
+        const visitGroups = groupIntoVisits(recentDesc);
+        const boundary = computeVisitorPathLowerBound(
+          visitGroups,
+          ref.startedAt,
+          previousConversation?.startedAt ?? null,
+        );
+        startedAtRange.$lt = boundary;
+      }
     }
 
     if (Object.keys(startedAtRange).length > 0) {

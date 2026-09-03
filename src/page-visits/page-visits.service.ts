@@ -43,6 +43,15 @@ export interface RecordPageChangeInput {
   conversationId?: string | null;
   pageUrl: string;
   attribution?: PageVisitAttributionSnapshot | null;
+  /** Per-tab id from the widget's `sessionStorage` (see PageVisit schema's
+   * own doc comment) — present on `VisitorSessionService.init()`'s calls,
+   * absent on the WS `visitor:page_changed` SPA-route-change path (that
+   * event carries no fresh one). When absent, `recordPageChange` below
+   * carries over the Visitor's own currently-open/most-recent PageVisit's
+   * `visitSessionId` instead of leaving the new row's blank — an SPA route
+   * change is still the SAME tab session as whatever `init()` last
+   * established, it just has no reason to resend the id every time. */
+  visitSessionId?: string | null;
 }
 
 export interface RecordPageChangeResult {
@@ -109,6 +118,23 @@ export class PageVisitsService {
       visitorId,
     );
 
+    // See RecordPageChangeInput's own doc comment: a caller that didn't
+    // send a fresh `visitSessionId` (the WS SPA-route-change path) is still
+    // continuing whatever tab session `init()` last established — carry
+    // that id over from `previous` (the PageVisit just closed out above) or,
+    // if none was open, the Visitor's most recent PageVisit on file, rather
+    // than writing this row with no session id at all.
+    let visitSessionId = input.visitSessionId ?? previous?.visitSessionId ?? null;
+    if (!input.visitSessionId && !previous) {
+      const latest = await this.pageVisitModel
+        .findOne({ visitorId })
+        .sort({ enteredAt: -1 })
+        .select('visitSessionId')
+        .lean()
+        .exec();
+      visitSessionId = latest?.visitSessionId ?? null;
+    }
+
     const current = await this.pageVisitModel.create({
       siteId,
       visitorId,
@@ -124,6 +150,7 @@ export class PageVisitsService {
       utmMedium: input.attribution?.utmMedium ?? null,
       utmCampaign: input.attribution?.utmCampaign ?? null,
       visitorPathLabel: input.attribution?.visitorPathLabel ?? null,
+      visitSessionId,
     });
 
     // Direct user feedback ("First seen"/"Last seen" reading identical
@@ -198,29 +225,39 @@ export class PageVisitsService {
   /**
    * Session P2-5 redesign (direct user feedback: "visit count will also be
    * increased if user came to our site and even just open the home page and
-   * close the website and go to some other website") — found while
-   * investigating that feedback: `VisitorSessionService.init()` was
-   * incrementing `Visitor.pastVisitsCount` on EVERY call, and `init()` fires
-   * on every widget boot, i.e. every full page load for a traditional
-   * multi-page site — so one real visitor browsing 5 pages in one sitting
-   * was inflating the counter by 5, not 1. This is the fix: "is the page
-   * load that's about to happen a genuinely NEW visit," using the exact same
-   * `CURRENT_VISIT_GAP_MINUTES` boundary `current-visit.util.ts` already
-   * defines for "current visit" grouping — reused, not re-derived. `true`
-   * when this Visitor has no PageVisit history at all yet (nothing to
-   * compare against — the very first page of the very first visit) or when
-   * the gap since their last-known page activity exceeds the threshold;
-   * `false` for a page navigated to within the same ongoing visit. Called
-   * BEFORE the new PageVisit for this page load is written (see
-   * `VisitorSessionService.init()`), so "latest" here still means the
-   * previous page, not the one about to be created.
+   * close the website and go to some other website") — `VisitorSessionService
+   * .init()` used to increment `Visitor.pastVisitsCount` on EVERY call, and
+   * `init()` fires on every widget boot, i.e. every full page load for a
+   * traditional multi-page site — so one real visitor browsing 5 pages in
+   * one sitting inflated the counter by 5, not 1. Called BEFORE the new
+   * PageVisit for this page load is written (see `VisitorSessionService
+   * .init()`), so "latest"/"last-known" below still mean the previous page,
+   * not the one about to be created.
+   *
+   * Direct user feedback — "a new visit" is now the tab being closed and
+   * reopened (matches Zendesk's own definition), not a rolling time gap.
+   * When the caller supplies `visitSessionId` (the widget's per-tab
+   * `sessionStorage` id — see PageVisit schema's doc comment), that's the
+   * authoritative signal: a new visit is simply "this id differs from the
+   * Visitor's last-known one" (or there is no PageVisit on file yet).
+   * Falls back to the OLD 30-minute-gap heuristic only when the caller
+   * sends no `visitSessionId` at all — an older cached widget bundle, or a
+   * non-browser/direct-API caller (this project's own e2e tests included) —
+   * so nothing that predates this feature regresses.
    */
-  async isNewVisit(visitorId: Types.ObjectId | string): Promise<boolean> {
+  async isNewVisit(
+    visitorId: Types.ObjectId | string,
+    visitSessionId?: string | null,
+  ): Promise<boolean> {
     const latest = await this.pageVisitModel
       .findOne({ visitorId })
       .sort({ enteredAt: -1 })
       .exec();
     if (!latest) return true;
+
+    if (visitSessionId) {
+      return latest.visitSessionId !== visitSessionId;
+    }
 
     const gapMs = CURRENT_VISIT_GAP_MINUTES * 60_000;
     const lastActivityEnd = (latest.exitedAt ?? latest.enteredAt).getTime();

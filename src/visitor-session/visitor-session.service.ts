@@ -57,6 +57,9 @@ export interface InitVisitorSessionInput {
   referrer?: string;
   userAgent?: string;
   ip?: string;
+  /** Per-tab id from the widget's `sessionStorage` — see
+   * `InitVisitorSessionDto.visitSessionId`'s doc comment. */
+  visitSessionId?: string;
 }
 
 /**
@@ -265,7 +268,12 @@ export class VisitorSessionService {
       // increments the count: `init()` (and this check) run regardless of
       // whether a Conversation ever exists.
       visitor.lastSeenAt = new Date();
-      if (await this.pageVisitsService.isNewVisit(visitor._id)) {
+      if (
+        await this.pageVisitsService.isNewVisit(
+          visitor._id,
+          input.visitSessionId,
+        )
+      ) {
         visitor.pastVisitsCount += 1;
       }
       Object.assign(visitor, attributionFields);
@@ -334,6 +342,7 @@ export class VisitorSessionService {
           visitorId: visitor._id,
           conversationId,
           pageUrl: input.pageUrl,
+          visitSessionId: input.visitSessionId ?? null,
           // Session P2-5 redesign — snapshot THIS call's own attribution
           // onto the PageVisit row itself (see that schema's doc comment on
           // why `Visitor.referrer`/`visitorPath` alone isn't enough for a

@@ -85,6 +85,7 @@ export function groupIntoVisits<
     enteredAt: Date;
     exitedAt: Date | null;
     durationSeconds: number | null;
+    visitSessionId?: string | null;
   },
 >(recentDesc: T[]): VisitGroup<T>[] {
   if (recentDesc.length === 0) return [];
@@ -95,6 +96,24 @@ export function groupIntoVisits<
   for (let i = 1; i < recentDesc.length; i++) {
     const later = recentDesc[i - 1];
     const earlier = recentDesc[i];
+    // Direct user feedback — a visit boundary is primarily the browser tab
+    // closing, not a time gap (matches Zendesk's own definition). When BOTH
+    // adjacent rows carry a `visitSessionId` (the widget's per-tab
+    // `sessionStorage` id), that's authoritative: same id = same tab =
+    // still one visit, no matter how long the visitor left the tab open and
+    // browsed elsewhere before coming back; different id = a genuinely new
+    // tab = a new visit, even if it happened seconds later. Only falls back
+    // to the old gap heuristic below when either row predates this field
+    // (legacy data, or a non-widget caller that never sent one) — see
+    // PageVisit schema's own doc comment.
+    if (later.visitSessionId && earlier.visitSessionId) {
+      if (later.visitSessionId !== earlier.visitSessionId) {
+        groupsDesc.push([earlier]);
+      } else {
+        groupsDesc[groupsDesc.length - 1].push(earlier);
+      }
+      continue;
+    }
     // Direct user feedback, found via a real 32-minute-gap live test that
     // still reported everything as ONE visit — the gap here USED to be
     // measured as `later.enteredAt - earlier.exitedAt`. That looked
