@@ -13,6 +13,8 @@ import { Model, Types } from 'mongoose';
 import {
   Conversation,
   ConversationDocument,
+  Message,
+  MessageDocument,
   Site,
   SiteDocument,
   Visitor,
@@ -100,6 +102,8 @@ export class VisitorSessionService {
     private readonly visitorModel: Model<VisitorDocument>,
     @InjectModel(Conversation.name)
     private readonly conversationModel: Model<ConversationDocument>,
+    @InjectModel(Message.name)
+    private readonly messageModel: Model<MessageDocument>,
     private readonly jwtService: JwtService,
     private readonly auditLogService: AuditLogService,
     private readonly attributionService: AttributionService,
@@ -434,6 +438,20 @@ export class VisitorSessionService {
    * .updateStatus` does, so an Agent Console watching the Visitor sees the
    * chat leave "Currently served" live, and audits as `system` (no human
    * actor closed it).
+   *
+   * **Unanswered proactive-outreach guard** (direct user feedback — an
+   * Agent's own proactive "hi" got a brand-new reference number two
+   * minutes after the first one, for a Visitor who never left). A
+   * Conversation an Agent started via `startProactiveConversation` that the
+   * Visitor hasn't replied to yet was never actually "used" during the
+   * visit that just ended from the Visitor's side — closing it here just
+   * orphans the Agent's outreach: `startProactiveConversation`'s own
+   * "reuse whatever's already open" dedupe can no longer find it once it's
+   * `closed`, so the Agent's very next message mints a second Conversation
+   * for what reads, to them, as the same outreach. Left open (and skipped
+   * below) so it carries straight into the new visit and gets reused
+   * instead — a Conversation the Visitor DID engage with during the ended
+   * visit still closes exactly as before.
    */
   private async closeChatsFromPreviousVisits(
     visitor: VisitorDocument,
@@ -450,6 +468,12 @@ export class VisitorSessionService {
       .exec();
 
     for (const conversation of stale) {
+      const hasVisitorMessage = await this.messageModel.exists({
+        conversationId: conversation._id,
+        senderType: 'visitor',
+      });
+      if (!hasVisitorMessage) continue;
+
       const before = conversation.status;
       conversation.status = 'closed';
       conversation.closedAt = new Date();

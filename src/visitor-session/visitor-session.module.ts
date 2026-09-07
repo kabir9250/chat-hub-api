@@ -4,6 +4,8 @@ import { MongooseModule } from '@nestjs/mongoose';
 import {
   Conversation,
   ConversationSchema,
+  Message,
+  MessageSchema,
   Site,
   SiteSchema,
   Visitor,
@@ -30,6 +32,11 @@ import { IpVisitorIdentityGuardModule } from '../common/rate-limit/ip-visitor-id
       // (this session, task requirement 4) — see
       // VisitorSessionService.findLatestConversationId's doc comment.
       { name: Conversation.name, schema: ConversationSchema },
+      // Direct user feedback fix — closeChatsFromPreviousVisits() needs to
+      // tell an Agent's still-unanswered proactive outreach apart from a
+      // Conversation the Visitor actually used during the visit that just
+      // ended (see that method's own doc comment).
+      { name: Message.name, schema: MessageSchema },
     ]),
     AuditLogModule,
     // Reuses AuthModule's JwtModule registration (same secret/expiry
