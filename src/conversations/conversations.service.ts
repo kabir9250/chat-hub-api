@@ -787,10 +787,11 @@ export class ConversationsService {
       .exec();
 
     const visitorOnline = this.visitorPresenceService.isConnected(visitorId);
+    const senderNames = await this.resolveSenderNames(messages);
 
     return {
       conversation,
-      messages: this.toMessageWireList(messages),
+      messages: this.toMessageWireList(messages, senderNames),
       visitorOnline,
     };
   }
@@ -2015,9 +2016,9 @@ export class ConversationsService {
       conversationId,
     );
     await this.assertVisible(actor, site._id, conversation);
-    return this.toMessageWireList(
-      await this.queryMessagesSince(conversation._id, since),
-    );
+    const messages = await this.queryMessagesSince(conversation._id, since);
+    const senderNames = await this.resolveSenderNames(messages);
+    return this.toMessageWireList(messages, senderNames);
   }
 
   async getMessagesSinceForVisitor(
@@ -2350,17 +2351,72 @@ export class ConversationsService {
    * `.toObject()` keeps every other field's existing JSON shape identical
    * to what was returned before this session (raw Mongoose documents,
    * serialized via their own default `toJSON`) — only `attachments` differs.
+   *
+   * `senderNames` (agent-facing bug fix, this session) — a per-message
+   * "who actually sent this" label, resolved from EACH message's own
+   * `senderId`, never from the Conversation's CURRENT `assignedAgentId`.
+   * Before this fix, the Agent Console (`MessageThread.tsx`) labeled every
+   * 'agent' message with the currently-assigned Agent's name — so a
+   * Supervisor reassignment silently rewrote history in the UI: Agent 1's
+   * earlier messages started reading as sent by Agent 2 the moment the
+   * Conversation changed hands, even though `Message.senderId` (never
+   * mutated by `assign()` — see its own doc comment) still correctly
+   * recorded Agent 1 as the sender all along. Callers that omit this map
+   * entirely (`getForVisitor`/`getMessagesSinceForVisitor` — see their own
+   * call sites) get byte-identical output to before: the Widget only ever
+   * distinguishes senderTYPE ("Live Support" vs. the Visitor), never a
+   * specific Agent's identity, and that stays true here — deliberately NOT
+   * threaded onto the Visitor-facing paths.
    */
-  private toMessageWire(message: MessageDocument): MessageWire {
+  private toMessageWire(
+    message: MessageDocument,
+    senderNames?: Map<string, string>,
+  ): MessageWire {
     const obj = message.toObject() as MessageWire;
     const attachments = (message.attachments ?? []).map((a) =>
       this.toAttachmentWire(a),
     );
-    return { ...obj, attachments };
+    if (!senderNames) {
+      return { ...obj, attachments };
+    }
+    const senderName =
+      message.senderType === 'agent' && message.senderId
+        ? (senderNames.get(message.senderId.toString()) ?? null)
+        : null;
+    return { ...obj, attachments, senderName };
   }
 
-  private toMessageWireList(messages: MessageDocument[]): MessageWire[] {
-    return messages.map((m) => this.toMessageWire(m));
+  private toMessageWireList(
+    messages: MessageDocument[],
+    senderNames?: Map<string, string>,
+  ): MessageWire[] {
+    return messages.map((m) => this.toMessageWire(m, senderNames));
+  }
+
+  /**
+   * Batches a `senderId -> displayName` lookup for every DISTINCT Agent who
+   * sent one of `messages`, for `toMessageWireList`'s `senderNames` param
+   * above. One query per transcript fetch, not one per message.
+   */
+  private async resolveSenderNames(
+    messages: MessageDocument[],
+  ): Promise<Map<string, string>> {
+    const agentIds = Array.from(
+      new Set(
+        messages
+          .filter((m) => m.senderType === 'agent' && m.senderId)
+          .map((m) => m.senderId!.toString()),
+      ),
+    );
+    if (agentIds.length === 0) return new Map();
+    const users = await this.userModel
+      .find(
+        { _id: { $in: agentIds.map((id) => new Types.ObjectId(id)) } },
+        'displayName',
+      )
+      .lean()
+      .exec();
+    return new Map(users.map((u) => [u._id.toString(), u.displayName]));
   }
 
   private escapeRegex(value: string): string {
