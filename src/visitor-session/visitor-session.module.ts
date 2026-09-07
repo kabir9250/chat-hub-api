@@ -16,6 +16,7 @@ import { AttributionModule } from '../attribution/attribution.module';
 import { LeadsModule } from '../leads/leads.module';
 import { PageVisitsModule } from '../page-visits/page-visits.module';
 import { RealtimeEventsModule } from '../realtime/realtime-events.module';
+import { VisitorPresenceModule } from '../realtime/visitor-presence.module';
 import { VisitorSessionService } from './visitor-session.service';
 import { VisitorSessionController } from './visitor-session.controller';
 import { IpVisitorIdentityGuardModule } from '../common/rate-limit/ip-visitor-identity-guard.module';
@@ -54,6 +55,10 @@ import { IpVisitorIdentityGuardModule } from '../common/rate-limit/ip-visitor-id
     // submitProfile() are the two REST touchpoints where a new distinct
     // Visitor identity is effectively created/confirmed from an IP.
     IpVisitorIdentityGuardModule,
+    // Session Fix-13 — the multi-tab guard for the visit-boundary chat
+    // close in `init()` (see `closeChatsFromPreviousVisits`'s doc comment).
+    // Leaf module, same singleton RealtimeModule already resolves.
+    VisitorPresenceModule,
   ],
   controllers: [VisitorSessionController],
   providers: [VisitorSessionService],

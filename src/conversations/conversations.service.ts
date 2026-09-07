@@ -257,6 +257,11 @@ export class ConversationsService {
       startedAt: new Date(),
       referenceNumber,
       tags: dto.tags ?? [],
+      // Agent-lock-fix — see the field's own doc comment
+      // (database/schemas/conversation.schema.ts): only the "nobody was
+      // available to auto-route to" branch ever actually goes through
+      // FR-RTE-02's whole-Department queue.
+      deptQueueVisible: !assignedAgentId,
     });
 
     if (dto.customFields !== undefined) {
@@ -340,6 +345,9 @@ export class ConversationsService {
       assignedAgentId: assignedAgentId ? assignedAgentId.toString() : null,
       visitorId: visitorDoc._id.toString(),
       initialMessage: dto.initialMessage,
+      departmentQueueMemberIds: assignedAgentId
+        ? undefined
+        : await this.getDepartmentQueueMemberIds(department._id, site._id),
     });
 
     return conversation;
@@ -411,6 +419,46 @@ export class ConversationsService {
     return best ? new Types.ObjectId(best.id) : null;
   }
 
+  /**
+   * Agent-lock-fix — every `enabled` User in `departmentId` who holds
+   * `conversations.view_own` but NOT `conversations.view_site` on this Site
+   * (a `view_site` holder already gets everything via `siteRoom` — see
+   * `siteAlertRoom`'s doc comment in `realtime.types.ts`, so listing them
+   * here too would just be a harmless-but-pointless duplicate emit). Online
+   * status is deliberately NOT filtered here (unlike `pickAgentForRouting`'s
+   * routing candidates) — this only feeds a WebSocket push to each id's own
+   * `agentRoom`, which is simply empty for anyone not currently connected.
+   */
+  private async getDepartmentQueueMemberIds(
+    departmentId: Types.ObjectId,
+    siteId: Types.ObjectId,
+  ): Promise<string[]> {
+    const candidates = await this.userModel
+      .find({ departmentId, enabled: true })
+      .select('_id')
+      .lean()
+      .exec();
+
+    const memberIds: string[] = [];
+    for (const candidate of candidates) {
+      const id = candidate._id.toString();
+      const [viewSite, viewOwn] = await Promise.all([
+        this.permissionsService.hasPermission(
+          id,
+          'conversations.view_site',
+          siteId,
+        ),
+        this.permissionsService.hasPermission(
+          id,
+          'conversations.view_own',
+          siteId,
+        ),
+      ]);
+      if (viewOwn && !viewSite) memberIds.push(id);
+    }
+    return memberIds;
+  }
+
   // ---------------------------------------------------------------------
   // List (FR-AGT-09, FR-CONV-03/06) — Agent/Admin-facing.
   // ---------------------------------------------------------------------
@@ -425,9 +473,20 @@ export class ConversationsService {
     const filter: FilterQuery<ConversationDocument> = { siteId: site._id };
 
     if (!scope.canViewSite) {
-      // conversations.view_own only — hard-pinned to the caller, regardless
-      // of any ?agentId= the caller passed in.
-      filter.assignedAgentId = new Types.ObjectId(actor.userId);
+      // conversations.view_own only — hard-pinned to Conversations assigned
+      // to the caller, regardless of any ?agentId= passed... PLUS
+      // (Agent-lock-fix) any Conversation this caller's own Department was
+      // ever handed via FR-RTE-02's whole-Department queue
+      // (`deptQueueVisible`), whether it's still unassigned or has since
+      // been claimed by a colleague — same "everyone in the queue keeps
+      // watching it get handled" visibility this fix's `assertVisible`
+      // grants for a single GET. Never widened by ?agentId=, same as the
+      // plain assignedAgentId branch it replaces.
+      const departmentId = await this.getActorDepartmentId(actor.userId);
+      filter.$or = [
+        { assignedAgentId: new Types.ObjectId(actor.userId) },
+        ...(departmentId ? [{ departmentId, deptQueueVisible: true }] : []),
+      ];
     } else if (query.agentId) {
       filter.assignedAgentId = new Types.ObjectId(query.agentId);
     }
@@ -604,6 +663,19 @@ export class ConversationsService {
         siteId: { $in: viewOwnOnlySiteIds },
         assignedAgentId: new Types.ObjectId(actor.userId),
       });
+      // Agent-lock-fix — same Department-queue widening as findAll() above,
+      // applied per-Site here since "All Sites" mode can span Departments
+      // on different Sites; a caller with no departmentId at all
+      // contributes nothing extra (getActorDepartmentId returns null, same
+      // as before this fix).
+      const departmentId = await this.getActorDepartmentId(actor.userId);
+      if (departmentId) {
+        scopeConditions.push({
+          siteId: { $in: viewOwnOnlySiteIds },
+          departmentId,
+          deptQueueVisible: true,
+        });
+      }
     }
 
     const filter: FilterQuery<ConversationDocument> =
@@ -673,11 +745,31 @@ export class ConversationsService {
     conversationId: string,
   ): Promise<ConversationWithTranscript> {
     const site = await this.assertSite(actor, siteId);
-    const conversation = await this.findConversationOnSite(
+    let conversation = await this.findConversationOnSite(
       site._id,
       conversationId,
     );
     await this.assertVisible(actor, site._id, conversation);
+
+    // Requirement 1 (agent-lock-fix) — a `conversations.view_own`-only
+    // caller (never `view_site` — see the doc's own Section 1: "Do NOT
+    // apply this trigger to a User whose access ... comes from
+    // conversations.view_site (Supervisor/Manager/Owner)") opening a
+    // Conversation that's still unassigned claims it right now, at the
+    // earliest possible point — before they've even seen the transcript,
+    // let alone typed anything. `assertVisible` above already proved they
+    // reached this Conversation legitimately (either it's already theirs,
+    // in which case this is a no-op, or FR-RTE-02's Department-queue
+    // visibility just let them in).
+    const scope = await this.resolveScope(actor, site._id);
+    if (!scope.canViewSite && !conversation.assignedAgentId) {
+      conversation = await this.autoClaimIfUnassigned(
+        actor,
+        site,
+        conversation,
+        'open',
+      );
+    }
 
     // Captured BEFORE populate() below replaces conversation.visitorId with
     // the full Visitor document — VisitorPresenceService is keyed by the
@@ -987,6 +1079,16 @@ export class ConversationsService {
     // this doesn't silently reject callers who were never part of the
     // "Assign to me"/"Reassign…"/"Claim" race this fix targets.
     expectedCurrentAgentId?: string | null,
+    // Agent-lock-fix — set by `autoClaimIfUnassigned` (below) for the two
+    // SYSTEM-triggered claims this fix adds (opening or replying into a
+    // still-unassigned Conversation). Every real caller (AssignControl.tsx/
+    // Inbox.tsx's explicit "Assign to me"/"Reassign…"/"Claim") never passes
+    // this — it only changes the audit-log action name/metadata so the two
+    // kinds of claim stay distinguishable after the fact; the write itself
+    // (the atomic compare-and-swap below) and the real-time broadcast are
+    // byte-identical either way, per the guardrail to reuse this exact
+    // mechanism rather than build a second one.
+    autoClaimTrigger?: 'open' | 'reply',
   ): Promise<ConversationDocument> {
     const site = await this.assertSite(actor, siteId);
     const conversation = await this.findConversationOnSite(
@@ -1066,11 +1168,15 @@ export class ConversationsService {
     await this.auditLog.record({
       actorType: 'user',
       actorId: actor.userId,
-      action: 'conversation.assigned',
+      action: autoClaimTrigger
+        ? 'conversation.auto_claimed'
+        : 'conversation.assigned',
       siteId: site._id,
       targetType: 'Conversation',
       targetId: updated._id,
-      metadata: { before, after: agentId },
+      metadata: autoClaimTrigger
+        ? { before, after: agentId, trigger: autoClaimTrigger }
+        : { before, after: agentId },
     });
 
     this.realtimeEvents.emit({
@@ -1079,9 +1185,93 @@ export class ConversationsService {
       conversationId: updated._id.toString(),
       changeType: 'assigned',
       data: { before, after: agentId },
+      // Agent-lock-fix — keeps the "Assign To" column live for every
+      // `view_own`-only Agent who was in this Department's queue, not just
+      // whoever holds `conversations.view_site` (already covered by the
+      // `siteRoom` emit RealtimeGateway does for every 'conversation.updated').
+      departmentQueueMemberIds: updated.deptQueueVisible
+        ? await this.getDepartmentQueueMemberIds(updated.departmentId, site._id)
+        : undefined,
     });
 
     return updated;
+  }
+
+  // ---------------------------------------------------------------------
+  // Agent-lock-fix (files/agent-lock-fix/10-conversation-lock-and-assign-
+  // column.md) — the two SYSTEM-triggered claims (open/reply) plus the
+  // send-time lock check. See the doc's own Section 3 table for the full
+  // trigger matrix this implements.
+  // ---------------------------------------------------------------------
+
+  /**
+   * Requirement 1/2 — if `conversation` is still unassigned, atomically
+   * claims it for `actor` by reusing `assign()`'s own compare-and-swap
+   * (`expectedCurrentAgentId: null`), race-safe against another simultaneous
+   * open/reply the exact same way an explicit "Assign to me" click already
+   * is. If the race is LOST (someone else's claim landed a moment earlier),
+   * that's not an error here — the caller just proceeds against whatever
+   * the Conversation's current state now actually is, and
+   * `assertCanSend`/the refreshed `assignedAgent` in the response decide
+   * what happens next.
+   */
+  private async autoClaimIfUnassigned(
+    actor: AuthenticatedUser,
+    site: SiteDocument,
+    conversation: ConversationDocument,
+    trigger: 'open' | 'reply',
+  ): Promise<ConversationDocument> {
+    if (conversation.assignedAgentId) return conversation;
+    try {
+      return await this.assign(
+        actor,
+        site._id.toString(),
+        conversation._id.toString(),
+        actor.userId,
+        null,
+        trigger,
+      );
+    } catch (err) {
+      if (err instanceof ConflictException) {
+        // Lost the race — re-fetch rather than propagate. `assign()` itself
+        // already re-fetched to build its 409 message, but doesn't return
+        // that document, so one more read here is the simplest correct way
+        // to hand the caller the CURRENT state.
+        const fresh = await this.conversationModel
+          .findOne({ _id: conversation._id, siteId: site._id })
+          .exec();
+        if (fresh) return fresh;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Requirement 3 — the core lock: once a Conversation has an assignee, only
+   * that assignee may send into it. `conversations.assign` does NOT bypass
+   * this on its own (Requirement 4/6's whole point — a Supervisor must
+   * explicitly "Take over" first, which makes them the assignee via
+   * `assign()`, before they can send); this check is deliberately blind to
+   * every permission except who currently holds the Conversation. Called
+   * AFTER `autoClaimIfUnassigned` in every send path, so a still-unassigned
+   * Conversation never reaches this at all — it's claimed by the sender
+   * first, same as Requirement 2 describes.
+   */
+  private async assertCanSend(
+    actor: AuthenticatedUser,
+    conversation: ConversationDocument,
+  ): Promise<void> {
+    const assignedAgentId = conversation.assignedAgentId?.toString() ?? null;
+    if (!assignedAgentId || assignedAgentId === actor.userId) return;
+    const assignee = await this.userModel
+      .findById(assignedAgentId, 'displayName')
+      .lean()
+      .exec();
+    throw new ForbiddenException(
+      assignee
+        ? `This conversation is already assigned to ${assignee.displayName}. Take over the conversation to send a message.`
+        : 'This conversation is already assigned to another Agent. Take over the conversation to send a message.',
+    );
   }
 
   // ---------------------------------------------------------------------
@@ -1180,11 +1370,36 @@ export class ConversationsService {
     body: string | null | undefined,
     attachments?: AttachmentRefInput[],
   ): Promise<MessageDocument> {
-    const conversation = await this.assertAgentConversationAccess(
+    let conversation = await this.assertAgentConversationAccess(
       actor,
       siteId,
       conversationId,
     );
+
+    // Requirement 2 (agent-lock-fix) — the safety net: if this send is
+    // landing on a still-unassigned Conversation (the open-trigger above
+    // didn't fire, or this message arrived via a path that skips it), claim
+    // it for the sender atomically, right here, before anything is
+    // persisted. Requirement 3's lock check right below then runs against
+    // whichever Conversation state actually won that race — see
+    // `autoClaimIfUnassigned`'s own doc comment.
+    if (!conversation.assignedAgentId) {
+      const site = await this.assertSite(actor, siteId);
+      conversation = await this.autoClaimIfUnassigned(
+        actor,
+        site,
+        conversation,
+        'reply',
+      );
+    }
+    // Requirement 3 — once assigned, only the assignee may send. Enforced
+    // here, at the service layer, so it holds regardless of transport
+    // (REST or the WebSocket `agent:send_message`/`agent:send_proactive_message`
+    // handlers, both of which call this same method — see this class's own
+    // doc comment on why there is no parallel send path) and regardless of
+    // any client-side composer disabling.
+    await this.assertCanSend(actor, conversation);
+
     const resolvedAttachments = this.resolveAttachmentRefs(
       siteId,
       conversationId,
@@ -1279,11 +1494,25 @@ export class ConversationsService {
     // Proactive outreach stays text-only this session (attachments weren't
     // asked for on this specific flow) — no attachments param, unlike
     // addAgentMessage above.
-    const conversation = await this.assertAgentConversationAccess(
+    let conversation = await this.assertAgentConversationAccess(
       actor,
       siteId,
       conversationId,
     );
+
+    // Agent-lock-fix Requirements 2/3 — identical claim-then-lock-check as
+    // addAgentMessage above; this is still a send, just via a different
+    // Widget-facing broadcast on top.
+    if (!conversation.assignedAgentId) {
+      const site = await this.assertSite(actor, siteId);
+      conversation = await this.autoClaimIfUnassigned(
+        actor,
+        site,
+        conversation,
+        'reply',
+      );
+    }
+    await this.assertCanSend(actor, conversation);
 
     const { deliveredAt, readAt } = this.computeInitialTickState(conversation);
     const message = await this.messageModel.create({
@@ -1912,13 +2141,21 @@ export class ConversationsService {
   /**
    * The core scoping rule (task requirement): a `view_site` holder may act
    * on any Conversation on the Site; a `view_own`-only holder may act only
-   * on a Conversation currently assigned to them. Applied uniformly to
-   * every read/mutation on a specific Conversation (get, status, assign,
-   * tag, message) — not just the list endpoint — so holding e.g.
-   * `conversations.close` without `conversations.view_site` can never be
-   * used to reach into a Conversation outside the caller's own scope.
-   * 404 (not 403) on failure — same "don't reveal existence" stance
+   * on a Conversation currently assigned to them, OR (Agent-lock-fix — see
+   * `Conversation.deptQueueVisible`'s own doc comment) one that was ever
+   * broadcast to their whole Department via FR-RTE-02's unassigned queue,
+   * whether it's since been claimed by them, by a colleague, or not at all.
+   * Applied uniformly to every read/mutation on a specific Conversation
+   * (get, status, assign, tag, message) — not just the list endpoint — so
+   * holding e.g. `conversations.close` without `conversations.view_site`
+   * can never be used to reach into a Conversation outside the caller's own
+   * scope. 404 (not 403) on failure — same "don't reveal existence" stance
    * `UsersService`/`VisitorsService` already take for cross-Site access.
+   *
+   * NOTE — this only decides what can be READ. Whether the caller may also
+   * SEND into a Conversation reached via the second branch is a completely
+   * separate question, answered by `assertCanSend` (below) — the whole
+   * point of this fix is that those two are no longer the same check.
    */
   private async assertVisible(
     actor: AuthenticatedUser,
@@ -1927,13 +2164,26 @@ export class ConversationsService {
   ): Promise<void> {
     const scope = await this.resolveScope(actor, siteId);
     if (scope.canViewSite) return;
-    if (
-      scope.canViewOwn &&
-      conversation.assignedAgentId?.toString() === actor.userId
-    ) {
-      return;
+    if (scope.canViewOwn) {
+      if (conversation.assignedAgentId?.toString() === actor.userId) return;
+      if (conversation.deptQueueVisible) {
+        const departmentId = await this.getActorDepartmentId(actor.userId);
+        if (departmentId?.equals(conversation.departmentId)) return;
+      }
     }
     throw new NotFoundException('Conversation not found on this Site.');
+  }
+
+  /** Agent-lock-fix — the caller's own `User.departmentId`, or `null` if unset. Small, deliberately uncached (`assertVisible`/`findAll` are not hot paths this app runs at a scale where one extra indexed `_id` lookup matters, and a fresh read here never risks serving a stale Department assignment). */
+  private async getActorDepartmentId(
+    userId: string,
+  ): Promise<Types.ObjectId | null> {
+    const user = await this.userModel
+      .findById(userId)
+      .select('departmentId')
+      .lean()
+      .exec();
+    return user?.departmentId ?? null;
   }
 
   private async assertSite(

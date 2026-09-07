@@ -32,6 +32,7 @@ import {
 import { LeadsService } from '../leads/leads.service';
 import { PageVisitsService } from '../page-visits/page-visits.service';
 import { RealtimeEventsService } from '../realtime/realtime-events.service';
+import { VisitorPresenceService } from '../realtime/visitor-presence.service';
 import { SubmitVisitorProfileDto } from './dto/submit-visitor-profile.dto';
 import {
   IpVisitorIdentityGuardService,
@@ -105,6 +106,7 @@ export class VisitorSessionService {
     private readonly leadsService: LeadsService,
     private readonly pageVisitsService: PageVisitsService,
     private readonly realtimeEvents: RealtimeEventsService,
+    private readonly visitorPresence: VisitorPresenceService,
     private readonly analyticsEvents: AnalyticsEventsService,
     private readonly ipVisitorIdentityGuard: IpVisitorIdentityGuardService,
   ) {}
@@ -268,16 +270,28 @@ export class VisitorSessionService {
       // increments the count: `init()` (and this check) run regardless of
       // whether a Conversation ever exists.
       visitor.lastSeenAt = new Date();
-      if (
-        await this.pageVisitsService.isNewVisit(
-          visitor._id,
-          input.visitSessionId,
-        )
-      ) {
+      const startsNewVisit = await this.pageVisitsService.isNewVisit(
+        visitor._id,
+        input.visitSessionId,
+      );
+      if (startsNewVisit) {
         visitor.pastVisitsCount += 1;
       }
       Object.assign(visitor, attributionFields);
       await visitor.save();
+
+      // Session Fix-13 (direct user feedback: "the chat session is not
+      // getting over") — a chat belongs to the VISIT it happened in. The
+      // previous visit ended when the Visitor closed their tab, so any
+      // Conversation still left `open`/`pending` from it is over too: close
+      // it here, at the exact boundary `pastVisitsCount` above already
+      // treats as "a genuinely new visit". Without this, the widget's
+      // `localStorage`-persisted conversationId meant one Conversation was
+      // reused forever, so "Past chats" could never be anything but 0 and
+      // every visit's messages piled into one endless transcript.
+      if (startsNewVisit) {
+        await this.closeChatsFromPreviousVisits(visitor, site);
+      }
     } else {
       visitor = await this.visitorModel.create({
         _id: pendingNewVisitorId,
@@ -391,6 +405,73 @@ export class VisitorSessionService {
       pastVisitsCount: visitor.pastVisitsCount,
       pastChatsCount: visitor.pastChatsCount,
     };
+  }
+
+  /**
+   * Session Fix-13 — ends the Visitor's still-live Conversations at a visit
+   * boundary (called only when `PageVisitsService.isNewVisit()` says this
+   * `init()` starts a genuinely new visit — a new browser tab, or a >30min
+   * gap for a client that sends no `visitSessionId`).
+   *
+   * **Why `init()` and not the socket disconnect.** A disconnect is not
+   * proof a visit ended — it also fires on a flaky connection, a laptop
+   * lid, or a background tab being frozen, and closing a live chat on any
+   * of those would be wrong. The next `init()` carrying a NEW
+   * `visitSessionId` is the first unambiguous evidence that the tab the old
+   * chat lived in is gone, which is exactly the signal the user described
+   * ("visitor closes the tab and comes back 1-2 minutes later").
+   *
+   * **Multi-tab guard.** A Visitor opening a SECOND tab while the first is
+   * still chatting also produces a new `visitSessionId`, and must not kill
+   * the live chat in tab one. The widget connects its socket only AFTER
+   * `init()` resolves, so at this exact moment "already connected" can only
+   * mean some OTHER tab of theirs is open — so we skip the close entirely
+   * and leave the existing Conversation to be resumed. (`init()` is also
+   * the one place where that check is unambiguous, another reason it lives
+   * here rather than on disconnect.)
+   *
+   * Emits the same `conversation.updated` event `ConversationsService
+   * .updateStatus` does, so an Agent Console watching the Visitor sees the
+   * chat leave "Currently served" live, and audits as `system` (no human
+   * actor closed it).
+   */
+  private async closeChatsFromPreviousVisits(
+    visitor: VisitorDocument,
+    site: SiteDocument,
+  ): Promise<void> {
+    if (this.visitorPresence.isConnected(visitor._id.toString())) return;
+
+    const stale = await this.conversationModel
+      .find({
+        visitorId: visitor._id,
+        siteId: site._id,
+        status: { $ne: 'closed' },
+      })
+      .exec();
+
+    for (const conversation of stale) {
+      const before = conversation.status;
+      conversation.status = 'closed';
+      conversation.closedAt = new Date();
+      await conversation.save();
+
+      await this.auditLogService.record({
+        actorType: 'system',
+        action: 'conversation.closed_on_visit_end',
+        siteId: site._id,
+        targetType: 'Conversation',
+        targetId: conversation._id,
+        metadata: { before, after: 'closed', reason: 'visitor_visit_ended' },
+      });
+
+      this.realtimeEvents.emit({
+        kind: 'conversation.updated',
+        siteId: site._id.toString(),
+        conversationId: conversation._id.toString(),
+        changeType: 'status',
+        data: { before, after: 'closed' },
+      });
+    }
   }
 
   private async resolveReturningVisitor(

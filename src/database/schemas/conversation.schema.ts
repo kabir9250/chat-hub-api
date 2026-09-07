@@ -70,6 +70,38 @@ export class Conversation {
 
   @Prop({ type: SchemaTypes.ObjectId, ref: 'Trigger', default: null })
   triggeredByRuleId!: Types.ObjectId | null;
+
+  /**
+   * Agent-lock-fix (`files/agent-lock-fix/10-conversation-lock-and-assign-
+   * column.md`) — set `true` once, the moment this Conversation is created
+   * `assignedAgentId: null` (FR-RTE-02's "no Agent available" outcome,
+   * `pickAgentForRouting` returning `null`). Marks this Conversation as
+   * having genuinely passed through the shared, whole-Department queue —
+   * as opposed to one that was assigned to a specific Agent immediately at
+   * creation and never broadcast Department-wide at all.
+   *
+   * This is what actually completes FR-RTE-02 for a `conversations.
+   * view_own`-only Agent: before this field existed, `assertVisible` only
+   * ever let such an Agent reach a Conversation already
+   * `assignedAgentId === self` — an unassigned Conversation 404'd for them
+   * (confirmed live, and see PROGRESS.md Session 8's own smoke test:
+   * "Agent reconnects and attempts `agent:join_conversation` on that still-
+   * unassigned Conversation → refused"), and the real-time gateway never
+   * even put a `view_own`-only socket in a room that would tell them it
+   * existed. The SRS's own wording ("visible to all Agents of that
+   * Department") was therefore never reachable by the default `Agent` Role.
+   * `deptQueueVisible: true` is the one-bit memory `assertVisible` now
+   * checks to grant that visibility — and, per the Zendesk reference
+   * behavior this fix cites, it deliberately never resets back to `false`
+   * once claimed: every Agent who could have raced to claim it can also
+   * keep watching it get handled (grayed out, per Zendesk), same as
+   * everyone who was in the room when the "Unassigned" queue card first
+   * appeared. Sending remains a fully separate check (see
+   * `ConversationsService.assertCanSend`) — this field only widens what can
+   * be READ, never what can be SENT into.
+   */
+  @Prop({ type: Boolean, default: false })
+  deptQueueVisible!: boolean;
 }
 
 export type ConversationDocument = Conversation & Document;

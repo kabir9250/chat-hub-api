@@ -51,6 +51,20 @@ export type RealtimeDomainEvent =
       assignedAgentId: string | null;
       visitorId: string;
       initialMessage?: string;
+      /**
+       * Agent-lock-fix — the `conversations.view_own`-only Users of this
+       * Department who otherwise never join `siteRoom` (see
+       * `siteAlertRoom`'s doc comment in `realtime.types.ts` for why that
+       * stays true for everything else). Only ever populated when this
+       * Conversation was created unassigned (`assignedAgentId: null` here)
+       * — RealtimeGateway additionally pushes `conversation:new` to each
+       * one's own `agentRoom`, which is what actually completes FR-RTE-02's
+       * "visible to all Agents of that Department" for that role. Omitted
+       * (not just empty) when the Conversation was auto-routed to someone
+       * at creation — that case was never Department-broadcast and stays
+       * exactly as private as it already was.
+       */
+      departmentQueueMemberIds?: string[];
     }
   | {
       kind: 'conversation.updated';
@@ -58,6 +72,11 @@ export type RealtimeDomainEvent =
       conversationId: string;
       changeType: ConversationChangeType;
       data?: Record<string, unknown>;
+      /** Agent-lock-fix — same purpose/condition as `conversation.created`'s
+       * own field above, for a later change (e.g. the auto-claim/take-over
+       * assigning it) to a Conversation that WAS created via that queue
+       * (`Conversation.deptQueueVisible`). */
+      departmentQueueMemberIds?: string[];
     }
   | {
       kind: 'message.created';

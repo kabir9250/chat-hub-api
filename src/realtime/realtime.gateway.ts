@@ -1,4 +1,4 @@
-import { Logger, OnModuleInit, UseGuards } from '@nestjs/common';
+import { Logger, OnModuleInit, UseFilters, UseGuards } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectModel } from '@nestjs/mongoose';
 import {
@@ -36,6 +36,7 @@ import {
 } from '../common/rate-limit/ip-visitor-identity-guard.service';
 import { extractSocketIp } from '../attribution/extract-client-ip.util';
 import { CONVERSATION_VIEW_PERMISSIONS } from '../conversations/conversations.constants';
+import { WsHttpExceptionFilter } from './ws-http-exception.filter';
 import {
   agentRoom,
   conversationRoom,
@@ -122,6 +123,20 @@ const IP_IDENTITY_LIMIT_ERROR = {
  *                                direct notifications (e.g. "assigned to
  *                                you", FR-AGT-04) and presence.set acks.
  *
+ * `pingInterval`/`pingTimeout` (T-12 live-server QA fix): Socket.IO's own
+ * defaults (25000ms/20000ms) leave up to ~45s before the server notices a
+ * dead connection when it never gets an explicit close signal (network
+ * drop, killed process/tab, a browser that skips `pagehide`) — measured
+ * live on the deployed API, the real gap was even worse than that ceiling
+ * suggests. Tightened here so that worst case is bounded much lower; this
+ * is the SAFETY NET for disconnect detection — the primary signal for an
+ * ordinary tab close is the widget's own explicit `pagehide` →
+ * `socket.disconnect()` (see `WidgetApp.tsx`), which fires `handleDisconnect`
+ * immediately rather than waiting on any timeout at all. Low enough to keep
+ * "visitor closed the tab" latency tight, high enough (well above one full
+ * interval+timeout) to tolerate a normal brief mobile-network hiccup
+ * without a false "offline".
+ *
  * CORS note (Session 9 bugfix): `@WebSocketGateway(options)` is a class
  * decorator, so its argument object is evaluated once, at module-import
  * time — BEFORE `ConfigModule`/dotenv has actually loaded `.env` into
@@ -146,7 +161,12 @@ const IP_IDENTITY_LIMIT_ERROR = {
       callback: (err: Error | null, allow?: string) => void,
     ) => callback(null, process.env.CORS_ORIGIN ?? 'http://localhost:3000'),
   },
+  // See the class doc comment ("pingInterval/pingTimeout") — was previously
+  // unset (Socket.IO defaults 25000/20000, up to ~45s worst case).
+  pingInterval: 10000,
+  pingTimeout: 5000,
 })
+@UseFilters(WsHttpExceptionFilter)
 export class RealtimeGateway
   implements
     OnGatewayInit,
@@ -199,6 +219,15 @@ export class RealtimeGateway
           // Department broadcast room in Phase 1 (see class doc comment),
           // so every Agent/Supervisor with view_site already just received
           // 'conversation:new' above with assignedAgentId: null.
+          //
+          // Agent-lock-fix — a `conversations.view_own`-only Agent never
+          // joins `siteRoom` (see `siteAlertRoom`'s doc comment) and so
+          // would never have learned this unassigned Conversation exists at
+          // all. `departmentQueueMemberIds` (only ever populated for this
+          // exact case — see ConversationsService.create) closes that gap
+          // by pushing the same event straight to each such Agent's own
+          // `agentRoom`, one Socket.IO room this file has always had.
+          this.emitToDepartmentQueueMembers(event, 'conversation:new');
           break;
 
         case 'conversation.updated':
@@ -208,6 +237,10 @@ export class RealtimeGateway
           this.server
             .to(conversationRoom(event.conversationId))
             .emit('conversation:updated', event);
+          // Agent-lock-fix — same gap as above: keeps the "Assign To" column
+          // live for every Agent who was in the Department queue for this
+          // Conversation, not just whoever holds `conversations.view_site`.
+          this.emitToDepartmentQueueMembers(event, 'conversation:updated');
           break;
 
         case 'message.created':
@@ -557,6 +590,23 @@ export class RealtimeGateway
       );
     } else {
       this.logger.log(`Client disconnected: ${client.id}`);
+    }
+  }
+
+  /**
+   * Agent-lock-fix — pushes `event` directly to every id in
+   * `event.departmentQueueMemberIds` (`conversations.view_own`-only Agents
+   * who never join `siteRoom`), one `agentRoom` at a time. A no-op when the
+   * field is absent/empty (every event kind not tied to a Department-queue
+   * Conversation, and the common case of a Conversation that was auto-
+   * routed to someone at creation and never Department-broadcast at all).
+   */
+  private emitToDepartmentQueueMembers(
+    event: { departmentQueueMemberIds?: string[] },
+    eventName: string,
+  ): void {
+    for (const userId of event.departmentQueueMemberIds ?? []) {
+      this.server.to(agentRoom(userId)).emit(eventName, event);
     }
   }
 
