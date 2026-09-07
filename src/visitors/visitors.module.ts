@@ -44,5 +44,10 @@ import { VisitorsService } from './visitors.service';
   ],
   controllers: [VisitorsController, CombinedVisitorsController],
   providers: [VisitorsService],
+  // Perf fix — RealtimeModule now imports this module so RealtimeGateway can
+  // attach a full LiveVisitor row directly to its `visitor.online` broadcast
+  // (see VisitorsService.getLiveVisitor's doc comment). No cycle: nothing
+  // this module imports depends on RealtimeModule.
+  exports: [VisitorsService],
 })
 export class VisitorsModule {}

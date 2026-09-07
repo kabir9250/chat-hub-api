@@ -201,37 +201,105 @@ export class VisitorsService {
       }
     }
 
-    return visitors.map((v) => {
-      const page = pageByVisitor.get(v._id.toString());
-      const activeConversationId = conversationByVisitor.get(v._id.toString());
-      return {
-        visitorId: v._id.toString(),
+    return visitors.map((v) =>
+      this.mapLiveVisitorRow(
+        v,
         siteId,
-        name: v.name ?? null,
-        email: v.email ?? null,
-        currentPage: page?.pageUrl ?? null,
-        pageCategory: page?.pageCategory ?? null,
-        enteredCurrentPageAt: page?.enteredAt
-          ? page.enteredAt.toISOString()
-          : null,
-        location: {
-          city: v.location?.city ?? null,
-          region: v.location?.region ?? null,
-          country: v.location?.country ?? null,
-        },
-        browser: v.browser ?? null,
-        deviceType: v.deviceType ?? null,
-        referrer: v.referrer ?? null,
-        landingPage: v.landingPage ?? null,
-        firstSeenAt: v.firstSeenAt.toISOString(),
-        lastSeenAt: v.lastSeenAt.toISOString(),
-        pastVisitsCount: v.pastVisitsCount,
-        pastChatsCount: v.pastChatsCount,
-        activeConversationId: activeConversationId
-          ? activeConversationId.toString()
-          : null,
-      };
-    });
+        pageByVisitor.get(v._id.toString()),
+        conversationByVisitor.get(v._id.toString()),
+      ),
+    );
+  }
+
+  /**
+   * Perf fix (direct user feedback — "visitor takes a while to show up in
+   * the live Visitors table even though we use Socket.IO") — the actual
+   * delay was never the socket, it was `RealtimeGateway.handleConnection`
+   * broadcasting a bare `{visitorId, siteId, timestamp}` on `visitor.online`
+   * and leaving `VisitorsPanel.tsx` to treat that as a "go find out what
+   * changed" signal: a 300ms debounce, then a full `GET .../visitors/live`
+   * REST round-trip that re-queries every online Visitor on the Site just to
+   * learn about the ONE that just connected. Same shape as
+   * `buildLiveVisitorsForSite` above but scoped to a single, already-known
+   * visitorId — lets the gateway attach the finished `LiveVisitor` row
+   * directly to the `visitor.online` payload, so the frontend can splice it
+   * straight into state with no refetch at all. `null` return (banned
+   * Visitor, or a race where the Visitor doc was deleted between connect and
+   * this lookup) tells the caller to fall back to its own refetch instead of
+   * emitting a payload with no row to show.
+   */
+  async getLiveVisitor(
+    visitorId: string,
+    siteId: string,
+  ): Promise<LiveVisitor | null> {
+    const visitorObjectId = new Types.ObjectId(visitorId);
+    const siteObjectId = new Types.ObjectId(siteId);
+
+    const [visitor, openPage, activeConversation] = await Promise.all([
+      this.visitorModel
+        .findOne({ _id: visitorObjectId, siteId: siteObjectId, isBanned: false })
+        .lean()
+        .exec(),
+      this.pageVisitModel
+        .findOne({ visitorId: visitorObjectId, exitedAt: null })
+        .sort({ enteredAt: -1 })
+        .lean()
+        .exec(),
+      this.conversationModel
+        .findOne({
+          visitorId: visitorObjectId,
+          siteId: siteObjectId,
+          status: { $ne: 'closed' },
+        })
+        .sort({ startedAt: -1 })
+        .select('_id')
+        .lean()
+        .exec(),
+    ]);
+    if (!visitor) return null;
+
+    return this.mapLiveVisitorRow(
+      visitor,
+      siteId,
+      openPage ?? undefined,
+      activeConversation?._id,
+    );
+  }
+
+  /** Shared row-shaping for `buildLiveVisitorsForSite`/`getLiveVisitor` — kept as one place so the two never drift on which fields the live list actually shows. Takes plain `.lean()` shapes (not the `*Document` Mongoose wrapper), matching what both callers actually query with. */
+  private mapLiveVisitorRow(
+    v: Visitor,
+    siteId: string,
+    page: PageVisit | undefined,
+    activeConversationId: Types.ObjectId | undefined,
+  ): LiveVisitor {
+    return {
+      visitorId: v._id.toString(),
+      siteId,
+      name: v.name ?? null,
+      email: v.email ?? null,
+      currentPage: page?.pageUrl ?? null,
+      pageCategory: page?.pageCategory ?? null,
+      enteredCurrentPageAt: page?.enteredAt
+        ? page.enteredAt.toISOString()
+        : null,
+      location: {
+        city: v.location?.city ?? null,
+        region: v.location?.region ?? null,
+        country: v.location?.country ?? null,
+      },
+      browser: v.browser ?? null,
+      deviceType: v.deviceType ?? null,
+      referrer: v.referrer ?? null,
+      landingPage: v.landingPage ?? null,
+      firstSeenAt: v.firstSeenAt.toISOString(),
+      lastSeenAt: v.lastSeenAt.toISOString(),
+      pastVisitsCount: v.pastVisitsCount,
+      pastChatsCount: v.pastChatsCount,
+      activeConversationId: activeConversationId
+        ? activeConversationId.toString()
+        : null,
+    };
   }
 
   async findAll(

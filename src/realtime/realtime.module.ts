@@ -6,6 +6,7 @@ import { AuthModule } from '../auth/auth.module';
 import { RbacModule } from '../rbac/rbac.module';
 import { ConversationsModule } from '../conversations/conversations.module';
 import { PageVisitsModule } from '../page-visits/page-visits.module';
+import { VisitorsModule } from '../visitors/visitors.module';
 import { PresenceModule } from './presence.module';
 import { RealtimeEventsModule } from './realtime-events.module';
 import { VisitorPresenceModule } from './visitor-presence.module';
@@ -43,6 +44,13 @@ import { IpVisitorIdentityGuardModule } from '../common/rate-limit/ip-visitor-id
     // `visitorOnline` field.
     PageVisitsModule,
     VisitorPresenceModule,
+    // Perf fix — `RealtimeGateway.handleConnection` uses `VisitorsService
+    // .getLiveVisitor` to attach a full row to `visitor.online` (see that
+    // method's doc comment). Not a cycle: VisitorsModule imports only
+    // MongooseModule/AuditLogModule/RbacModule/LeadsModule/
+    // RealtimeEventsModule/VisitorPresenceModule, none of which import this
+    // module.
+    VisitorsModule,
     // Session Fix-11 — per-IP multi-session abuse guard (§6.3 business
     // decision), shared with VisitorSessionModule via this same leaf module
     // so both resolve one singleton (see its own doc comment).

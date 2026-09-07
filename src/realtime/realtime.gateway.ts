@@ -25,6 +25,7 @@ import { RequirePermission } from '../rbac/decorators/require-permission.decorat
 import { PermissionsService } from '../rbac/permissions.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { PageVisitsService } from '../page-visits/page-visits.service';
+import { VisitorsService } from '../visitors/visitors.service';
 import type { AttachmentRefInput } from '../storage/attachment.types';
 import { PresenceService, PresenceStatus } from './presence.service';
 import { RealtimeEventsService } from './realtime-events.service';
@@ -188,6 +189,7 @@ export class RealtimeGateway
     private readonly conversationsService: ConversationsService,
     private readonly pageVisitsService: PageVisitsService,
     private readonly visitorPresenceService: VisitorPresenceService,
+    private readonly visitorsService: VisitorsService,
     private readonly wsRateLimiter: WsRateLimiterService,
     private readonly ipVisitorIdentityGuard: IpVisitorIdentityGuardService,
   ) {}
@@ -438,6 +440,20 @@ export class RealtimeGateway
       // already uses (auto-joined by connectAsUser above for any User
       // holding conversations.view_site).
       if (wentOnline) {
+        // Perf fix (direct user feedback — the live Visitors table was slow
+        // to show a new arrival despite this being a real-time socket
+        // broadcast). The delay was never this event — it fired the instant
+        // the socket connected — it was that this payload used to carry no
+        // Visitor data, just a "something changed" nudge, so
+        // `VisitorsPanel.tsx` had to debounce 300ms then re-fetch the WHOLE
+        // live list over REST just to learn about the one new arrival.
+        // Attaching the finished row here lets the frontend splice it
+        // straight into state with no refetch at all. `null` (banned
+        // Visitor, or a delete-between-connect-and-lookup race) tells the
+        // frontend to fall back to its own refetch instead.
+        const liveVisitor = await this.visitorsService
+          .getLiveVisitor(visitor.visitorId, visitor.siteId)
+          .catch(() => null);
         // This session's addition — retargeted from `siteRoom` to
         // `siteAlertRoom` (business decision: "visitor arrived" alert
         // sound must work by default for every Agent/Supervisor/Owner, not
@@ -447,6 +463,7 @@ export class RealtimeGateway
           siteId: visitor.siteId,
           visitorId: visitor.visitorId,
           timestamp: new Date().toISOString(),
+          visitor: liveVisitor,
         });
       }
       this.logger.log(
