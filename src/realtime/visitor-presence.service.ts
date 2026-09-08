@@ -46,6 +46,57 @@ export class VisitorPresenceService {
   private readonly connections = new Map<string, Set<string>>();
   private readonly siteByVisitor = new Map<string, string>();
   private readonly foregroundConversation = new Map<string, string>();
+  // Heartbeat/TTL reconciliation (Zendesk-style self-healing presence) — see
+  // RealtimeGateway's `visitor:heartbeat` handler + sweep interval for why
+  // this exists: `removeConnection` below only clears an entry when a real
+  // Socket.IO `disconnect` event fires for every one of a Visitor's sockets,
+  // but a live-server case (id ending 737d6595, found investigating a user
+  // report) showed that event can simply never arrive — the socket dies
+  // without a clean close/FIN and the process never learns about it — which
+  // left that Visitor "online" in this Map indefinitely, forever, with no
+  // way to self-correct. The widget now pings this over its existing socket
+  // every ~20s (see WidgetApp.tsx); the sweep in RealtimeGateway force-
+  // expires anyone whose last heartbeat is older than its threshold, closing
+  // the same gap `disconnect` was supposed to but sometimes doesn't.
+  private readonly lastHeartbeatAt = new Map<string, number>();
+
+  /** Records/refreshes "this Visitor is still really there" — called both
+   * on connect (see `addConnection`) and on every `visitor:heartbeat`. */
+  touchHeartbeat(visitorId: string): void {
+    this.lastHeartbeatAt.set(visitorId, Date.now());
+  }
+
+  /** Every currently-tracked Visitor whose last heartbeat is older than
+   * `maxAgeMs` — candidates for `forceExpire` below. A Visitor with no
+   * heartbeat on record at all (shouldn't happen, `addConnection` always
+   * sets one) is treated as stale too, defensively. */
+  getStaleVisitorIds(
+    maxAgeMs: number,
+  ): { visitorId: string; siteId: string }[] {
+    const now = Date.now();
+    const stale: { visitorId: string; siteId: string }[] = [];
+    for (const [visitorId, siteId] of this.siteByVisitor.entries()) {
+      const last = this.lastHeartbeatAt.get(visitorId) ?? 0;
+      if (now - last > maxAgeMs) {
+        stale.push({ visitorId, siteId });
+      }
+    }
+    return stale;
+  }
+
+  /** Unconditionally clears a Visitor's presence — used by the sweep to
+   * expire a stale entry regardless of how many (dead) sockets it thinks
+   * are still open, unlike `removeConnection`'s one-socket-at-a-time
+   * bookkeeping for the normal disconnect path. Returns the Visitor's
+   * siteId, or `null` if they weren't tracked (already cleaned up). */
+  forceExpire(visitorId: string): { siteId: string } | null {
+    const siteId = this.siteByVisitor.get(visitorId) ?? null;
+    this.connections.delete(visitorId);
+    this.siteByVisitor.delete(visitorId);
+    this.foregroundConversation.delete(visitorId);
+    this.lastHeartbeatAt.delete(visitorId);
+    return siteId ? { siteId } : null;
+  }
 
   /**
    * Registers a new socket for this Visitor. Returns `true` only when this
@@ -63,6 +114,7 @@ export class VisitorPresenceService {
     }
     sockets.add(socketId);
     this.siteByVisitor.set(visitorId, siteId);
+    this.touchHeartbeat(visitorId);
     return wentOnline;
   }
 
@@ -91,6 +143,7 @@ export class VisitorPresenceService {
       // "gone from site" posture of the connection map itself, just for the
       // narrower foreground signal).
       this.foregroundConversation.delete(visitorId);
+      this.lastHeartbeatAt.delete(visitorId);
     }
     return siteId ? { siteId, wentOffline } : null;
   }

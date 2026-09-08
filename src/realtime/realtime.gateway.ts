@@ -1,4 +1,10 @@
-import { Logger, OnModuleInit, UseFilters, UseGuards } from '@nestjs/common';
+import {
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+  UseFilters,
+  UseGuards,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectModel } from '@nestjs/mongoose';
 import {
@@ -173,9 +179,22 @@ export class RealtimeGateway
     OnGatewayInit,
     OnGatewayConnection,
     OnGatewayDisconnect,
-    OnModuleInit
+    OnModuleInit,
+    OnModuleDestroy
 {
   private readonly logger = new Logger(RealtimeGateway.name);
+  // Heartbeat/TTL presence sweep (see VisitorPresenceService's doc comment
+  // for the live-server bug this closes) — Zendesk-style self-healing: the
+  // widget pings every HEARTBEAT_INTERVAL_MS-ish, and anyone whose last
+  // heartbeat is older than STALE_THRESHOLD_MS gets force-expired here even
+  // if their socket's own `disconnect` event never fired. Threshold is a
+  // few heartbeat intervals' worth of slack — well above the ~15s
+  // pingInterval/pingTimeout safety net above already covers, so this sweep
+  // only ever catches the case that safety net itself missed, not ordinary
+  // network hiccups.
+  private static readonly STALE_VISITOR_THRESHOLD_MS = 60_000;
+  private static readonly STALE_SWEEP_INTERVAL_MS = 30_000;
+  private staleSweepTimer?: ReturnType<typeof setInterval>;
 
   @WebSocketServer()
   server: Server;
@@ -280,20 +299,22 @@ export class RealtimeGateway
           // holders (see `siteAlertRoom`'s doc comment). Every `siteRoom`
           // member is also a `siteAlertRoom` member, so this single target
           // still reaches exactly who it always did, plus everyone new.
-          this.server.to(siteAlertRoom(event.siteId)).emit('conversation:updated', {
-            kind: 'conversation.updated',
-            siteId: event.siteId,
-            conversationId: event.conversationId,
-            changeType: 'message',
-            referenceNumber: event.referenceNumber,
-            visitor: { name: event.visitorName ?? null },
-            data: {
-              messageId: event.message.id,
-              senderType: event.message.senderType,
-              bodyPreview: this.truncateForNotification(event.message.body),
-              hasAttachments: event.message.attachments.length > 0,
-            },
-          });
+          this.server
+            .to(siteAlertRoom(event.siteId))
+            .emit('conversation:updated', {
+              kind: 'conversation.updated',
+              siteId: event.siteId,
+              conversationId: event.conversationId,
+              changeType: 'message',
+              referenceNumber: event.referenceNumber,
+              visitor: { name: event.visitorName ?? null },
+              data: {
+                messageId: event.message.id,
+                senderType: event.message.senderType,
+                bodyPreview: this.truncateForNotification(event.message.body),
+                hasAttachments: event.message.attachments.length > 0,
+              },
+            });
           break;
 
         // Session 11.3's additions — broadcast to ONLY the
@@ -384,6 +405,54 @@ export class RealtimeGateway
           break;
       }
     });
+
+    this.staleSweepTimer = setInterval(() => {
+      void this.sweepStaleVisitors();
+    }, RealtimeGateway.STALE_SWEEP_INTERVAL_MS);
+  }
+
+  onModuleDestroy() {
+    if (this.staleSweepTimer) clearInterval(this.staleSweepTimer);
+  }
+
+  /**
+   * The self-healing half of the heartbeat mechanism (see the class doc
+   * comment + VisitorPresenceService's doc comment for the bug this fixes).
+   * Runs on its own timer, independent of any one socket's lifecycle —
+   * force-expires any Visitor whose last heartbeat is stale, using the same
+   * "wentOffline" side effects `handleDisconnect`'s visitor branch already
+   * performs (offline broadcast + close the open PageVisit), so an agent
+   * watching the live list sees exactly the same result whether the
+   * Visitor's tab closed cleanly or just vanished.
+   */
+  private async sweepStaleVisitors(): Promise<void> {
+    const stale = this.visitorPresenceService.getStaleVisitorIds(
+      RealtimeGateway.STALE_VISITOR_THRESHOLD_MS,
+    );
+    for (const { visitorId, siteId } of stale) {
+      const result = this.visitorPresenceService.forceExpire(visitorId);
+      if (!result) continue;
+      // Best-effort: also drop any socket(s) still registered in this
+      // Visitor's room (a genuinely dead/orphaned connection that never
+      // fired `disconnect`) so a later stray event from it can't resurrect
+      // presence for an id we just declared offline.
+      this.server.in(visitorRoom(visitorId)).disconnectSockets(true);
+      this.server.to(siteAlertRoom(result.siteId)).emit('visitor.offline', {
+        siteId: result.siteId,
+        visitorId,
+        timestamp: new Date().toISOString(),
+      });
+      try {
+        await this.pageVisitsService.closeOpenPageVisitOnDisconnect(visitorId);
+      } catch (err) {
+        this.logger.warn(
+          `Failed to close out PageVisit on stale-visitor expiry: ${(err as Error).message}`,
+        );
+      }
+      this.logger.log(
+        `Visitor ${visitorId} force-expired (stale heartbeat, site ${siteId})`,
+      );
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -1147,6 +1216,20 @@ export class RealtimeGateway
     } catch (err) {
       return { event: 'error', data: { message: (err as Error).message } };
     }
+  }
+
+  /**
+   * Heartbeat/TTL presence (see class + VisitorPresenceService doc comments)
+   * — the widget pings this on an interval over its already-open socket for
+   * as long as the tab is alive. No-op response, no permission check (same
+   * posture as every other `visitor:*` handler): this only ever refreshes
+   * the caller's OWN presence timestamp, nothing else.
+   */
+  @SubscribeMessage('visitor:heartbeat')
+  @UseGuards(WsVisitorGuard)
+  handleVisitorHeartbeat(@ConnectedSocket() client: Socket) {
+    const { visitor } = client.data as RealtimeSocketData;
+    this.visitorPresenceService.touchHeartbeat(visitor!.visitorId);
   }
 
   @SubscribeMessage('visitor:typing')
