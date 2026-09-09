@@ -62,6 +62,12 @@ export interface LiveVisitor {
     country: string | null;
   };
   browser: string | null;
+  /** Visitor-table icon-trio work (agent Visitors tab) — `VisitorProfile`
+   * already carried this; the live-list row never did, so the table's new
+   * OS/platform icon had no per-row field to key off. Backed by the same
+   * `Visitor.os` (`AttributionService.parseUserAgent`'s `ua.os`) the info
+   * panel's "Platform" field already reads. */
+  os: string | null;
   deviceType: string | null;
   referrer: string | null;
   landingPage: string | null;
@@ -289,6 +295,7 @@ export class VisitorsService {
         country: v.location?.country ?? null,
       },
       browser: v.browser ?? null,
+      os: v.os ?? null,
       deviceType: v.deviceType ?? null,
       referrer: v.referrer ?? null,
       landingPage: v.landingPage ?? null,

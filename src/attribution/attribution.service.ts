@@ -19,6 +19,12 @@ export interface VisitorAttributionSnapshot {
   deviceType: string;
   userAgentRaw: string | null;
   currentIp: string | null;
+  /** `country` is always an ISO 3166-1 alpha-2 code (e.g. `"US"`), never a
+   * full name — both `resolveLocation` paths below now agree on this, and
+   * it's what the visitor-table country-flag icon (`flag-icons`, see
+   * `CountryFlag` in `chat-hub-web/src/agent/components/visitorMeta.tsx`)
+   * keys its CSS class off. Render a full country name from it client-side
+   * via `Intl.DisplayNames`, don't store one here. */
   location: { city?: string; region?: string; country?: string };
 }
 
@@ -217,6 +223,20 @@ export class AttributionService {
    * `geoip-lite` couldn't resolve. 2s timeout via `AbortController`; any
    * failure (timeout, network error, non-2xx, malformed body) is swallowed
    * and returns `{}` — same contract as the offline lookup above.
+   *
+   * Country-code fix (visitor-table country-flag icon work): this used to
+   * request ip-api.com's `country` field (a full name like "United
+   * States") and store it straight into `location.country` — but
+   * `geoip-lite`'s own lookup above (the primary, non-fallback path) writes
+   * an ISO 3166-1 alpha-2 code into that same field (e.g. "US"), and so does
+   * every seeded test fixture (`seed-test.ts`'s `geo` pool: `'US'`, `'GB'`,
+   * `'CA'`, `'AU'`). A Visitor resolved via this fallback therefore used to
+   * carry a differently-shaped `location.country` than everyone else — no
+   * visible bug before now since it was only ever rendered as plain text,
+   * but the new country-flag icon (`CountryFlag`, `chat-hub-web`) keys its
+   * `flag-icons` CSS class directly off this field and needs it to always
+   * be the 2-letter code. Requesting `countryCode` instead keeps this path
+   * consistent with the other two.
    */
   private async resolveLocationOnline(ip: string): Promise<{
     city?: string;
@@ -227,7 +247,7 @@ export class AttributionService {
     const timeout = setTimeout(() => controller.abort(), 2000);
     try {
       const res = await fetch(
-        `http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,city,regionName,country`,
+        `http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,city,regionName,countryCode`,
         { signal: controller.signal },
       );
       if (!res.ok) return {};
@@ -235,13 +255,13 @@ export class AttributionService {
         status?: string;
         city?: string;
         regionName?: string;
-        country?: string;
+        countryCode?: string;
       };
       if (body.status !== 'success') return {};
       return {
         city: body.city || undefined,
         region: body.regionName || undefined,
-        country: body.country || undefined,
+        country: body.countryCode || undefined,
       };
     } catch (err) {
       this.logger.warn(
