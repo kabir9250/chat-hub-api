@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsIn,
   IsInt,
   IsOptional,
@@ -11,6 +12,35 @@ import {
 
 import { SOUND_IDS } from '../../database/schemas';
 import type { SoundId } from '../../database/schemas';
+
+/**
+ * Site-wide DEFAULT for the 4 desktop-popup toggles — mirrors the per-user
+ * `UpdateNotificationPreferencesDto`'s own 4 top-level booleans. Nested
+ * under its own DTO (not flattened) for the same reason the schema nests
+ * `SiteNotificationToggles` — `chatRequest` needs to exist as both a
+ * boolean here and a distinct sound-event object on the parent DTO.
+ */
+export class UpdateSiteNotificationTogglesDto {
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean()
+  chatRequest?: boolean;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean()
+  newMessages?: boolean;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean()
+  statusChanges?: boolean;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean()
+  sessionExpiry?: boolean;
+}
 
 /**
  * FR-CFG — site-scoped Sound & Notification settings (`Site.soundNotificationSettings`).
@@ -43,6 +73,12 @@ export class UpdateSiteChatRequestSoundSettingDto extends UpdateSiteSoundSetting
 }
 
 export class UpdateSoundNotificationSettingsDto {
+  @ApiPropertyOptional({ type: UpdateSiteNotificationTogglesDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => UpdateSiteNotificationTogglesDto)
+  notifications?: UpdateSiteNotificationTogglesDto;
+
   @ApiPropertyOptional({ type: UpdateSiteSoundSettingDto })
   @IsOptional()
   @ValidateNested()

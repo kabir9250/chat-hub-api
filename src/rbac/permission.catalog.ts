@@ -118,37 +118,42 @@ export const PERMISSION_CATALOG: readonly PermissionDefinition[] = [
   {
     key: 'sound_notifications.view',
     module: 'Sound & Notifications',
-    description: "View a Site's sound & notification settings",
+    description:
+      "View a Site's sound & notification default, or (Personal screen) " +
+      "the caller's own effective sound setting",
   },
   {
     key: 'sound_notifications.manage',
     module: 'Sound & Notifications',
     description:
-      "Edit a Site's sound & notification settings — shared by every " +
-      'Agent/Admin who views the Site, not a per-user preference. Any ' +
+      "Edit a Site's sound & notification default — shared by every " +
+      'Agent/Admin who has no personal override, unless they hold this key ' +
+      'themselves, in which case they may also view/edit their own ' +
+      'personal override (Personal screen\'s Sound & Notifications tab), ' +
+      "which takes precedence over the Site default for them alone. Any " +
       'holder of ordinary inbox access to the Site (conversations.view_own/' +
-      '.view_site) can still READ these settings even without this key, ' +
+      '.view_site) can still READ the Site default even without this key, ' +
       'since Agents need to know what sound to play — see ' +
       "SoundNotificationsController's GET route.",
   },
-  // Direct user request — catalog-only additions alongside
-  // sound_notifications.*, reserved for a future site-scoped Idle Timeout
-  // admin screen (mirroring the per-user IdleTimeoutSettings that already
-  // exists on User, same as sound_notifications mirrors the per-user
-  // NotificationSounds). Not wired to any controller/route yet, and not
-  // granted to any seeded Role by default (not even Owner via
-  // ALL_PERMISSION_KEYS is meaningful here since there is nothing to view/
-  // manage yet) — an Owner enables it manually per-Role once the feature
-  // exists.
+  // Wired to the site-scoped Idle Timeout default (`IdleTimeoutController`,
+  // `Site.idleTimeoutSettings`) — same GET/PATCH split as
+  // sound_notifications.*. Also gates a per-agent PERSONAL override of their
+  // own `/users/me/idle-timeout-settings` value (Personal screen's Idle
+  // Timeout tab): holding `.manage` lets that Agent view/edit their own
+  // override, which takes precedence over the Site default for them alone;
+  // holding neither key means they simply follow the Site default silently.
   {
     key: 'idle_timeout.view',
     module: 'Idle Timeout',
-    description: "View a Site's idle timeout settings",
+    description:
+      "View a Site's idle timeout default, or (Personal screen) the caller's own effective idle timeout setting",
   },
   {
     key: 'idle_timeout.manage',
     module: 'Idle Timeout',
-    description: "Edit a Site's idle timeout settings",
+    description:
+      "Edit a Site's idle timeout default, or (Personal screen) the caller's own personal override",
   },
   // Direct user request — same reservation as idle_timeout.* above, for a
   // future site-scoped Email Reports admin screen.

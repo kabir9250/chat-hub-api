@@ -7,8 +7,10 @@ import {
   SiteDocument,
   SoundNotificationSettings,
 } from '../database/schemas/site.schema';
+import { User, UserDocument } from '../database/schemas/user.schema';
 import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interface';
+import { PermissionsService } from '../rbac/permissions.service';
 import {
   UpdateSiteChatRequestSoundSettingDto,
   UpdateSiteSoundSettingDto,
@@ -37,7 +39,9 @@ const SOUND_EVENT_KEYS: SoundEventKey[] = [
 export class SoundNotificationsService {
   constructor(
     @InjectModel(Site.name) private readonly siteModel: Model<SiteDocument>,
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     private readonly auditLogService: AuditLogService,
+    private readonly permissionsService: PermissionsService,
   ) {}
 
   async get(
@@ -48,6 +52,54 @@ export class SoundNotificationsService {
     return site.soundNotificationSettings;
   }
 
+  /**
+   * The sound & notification settings actually in effect for `actor` on
+   * this Site: their own personal override
+   * (`User.notificationPreferences`) if they hold
+   * `sound_notifications.view`/`.manage` on this Site (Personal screen's
+   * Sound & Notifications tab), else the Site default. Holding
+   * `.view`/`.manage` at all is treated as "has an override" — the per-user
+   * schema is always populated with schema defaults, so there's no separate
+   * "never touched" state to distinguish.
+   *
+   * Returned in the SITE schema's shape (`{notifications: {...4 booleans},
+   * ...6 sound events}`) regardless of which source it came from — the
+   * per-user schema splits the same data across two sibling fields
+   * (`NotificationPreferences`'s own 4 top-level booleans, and its `.sounds`
+   * for the 6 events), so this always re-assembles into one consistent
+   * shape for callers rather than exposing that per-user split.
+   */
+  async getEffective(
+    actor: AuthenticatedUser,
+    siteId: string,
+  ): Promise<SoundNotificationSettings> {
+    const site = await this.assertSite(actor, siteId);
+    const permissions = await this.permissionsService.getEffectivePermissions(
+      actor.userId,
+      siteId,
+    );
+    const hasOverride =
+      permissions.includes('sound_notifications.view') ||
+      permissions.includes('sound_notifications.manage');
+    if (!hasOverride) {
+      return site.soundNotificationSettings;
+    }
+    const user = await this.userModel.findById(actor.userId).lean().exec();
+    const prefs = user?.notificationPreferences;
+    if (!prefs) {
+      return site.soundNotificationSettings;
+    }
+    return {
+      notifications: {
+        chatRequest: prefs.chatRequest,
+        newMessages: prefs.newMessages,
+        statusChanges: prefs.statusChanges,
+        sessionExpiry: prefs.sessionExpiry,
+      },
+      ...prefs.sounds,
+    };
+  }
+
   async update(
     actor: AuthenticatedUser,
     siteId: string,
@@ -55,6 +107,10 @@ export class SoundNotificationsService {
   ): Promise<SoundNotificationSettings> {
     const site = await this.assertSite(actor, siteId);
     const before = { ...site.soundNotificationSettings };
+
+    if (dto.notifications) {
+      Object.assign(site.soundNotificationSettings.notifications, dto.notifications);
+    }
 
     for (const key of SOUND_EVENT_KEYS) {
       const patch = dto[key] as

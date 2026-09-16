@@ -67,4 +67,23 @@ export class SoundNotificationsController {
   ) {
     return this.soundNotificationsService.update(user, siteId, dto);
   }
+
+  @ApiOperation({
+    summary:
+      "Get the caller's effective Sound & Notification settings on this Site — their own personal override if they hold sound_notifications.view/.manage, else the Site default",
+  })
+  @ApiParam(SITE_ID_PARAM)
+  @Get('effective')
+  @RequirePermission([
+    'sound_notifications.view',
+    'sound_notifications.manage',
+    'conversations.view_own',
+    'conversations.view_site',
+  ])
+  getEffective(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('siteId') siteId: string,
+  ) {
+    return this.soundNotificationsService.getEffective(user, siteId);
+  }
 }

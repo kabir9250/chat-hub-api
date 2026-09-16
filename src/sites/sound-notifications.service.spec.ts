@@ -43,11 +43,15 @@ describe('SoundNotificationsService', () => {
       }),
     };
     const auditLogService = { record: jest.fn().mockResolvedValue(undefined) };
+    const userModel = { findById: jest.fn() };
+    const permissionsService = { getEffectivePermissions: jest.fn() };
     const service = new SoundNotificationsService(
       siteModel as never,
+      userModel as never,
       auditLogService as never,
+      permissionsService as never,
     );
-    return { service, siteModel, auditLogService, save };
+    return { service, siteModel, auditLogService, userModel, permissionsService, save };
   }
 
   function makeSite(): SiteDocument {

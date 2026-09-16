@@ -64,8 +64,44 @@ export const SiteChatRequestSoundSettingSchema = SchemaFactory.createForClass(
   SiteChatRequestSoundSetting,
 );
 
+/**
+ * Site-wide DEFAULT for the 4 desktop-popup on/off toggles — applied to
+ * every Agent/Admin on this Site who has no personal override
+ * (`sound_notifications.view`/`.manage`), mirrors `NotificationPreferences`'s
+ * own 4 top-level booleans on `User`. Kept as its OWN nested sub-object
+ * (not flattened into `SoundNotificationSettings` directly) for the exact
+ * same reason `NotificationPreferences` nests its own `sounds` sub-object:
+ * `chatRequest` needs to exist as both a toggle boolean here AND a distinct
+ * sound-event object on the parent — flat naming would collide.
+ */
+@Schema({ _id: false })
+export class SiteNotificationToggles {
+  @Prop({ type: Boolean, required: true, default: true })
+  chatRequest!: boolean;
+
+  @Prop({ type: Boolean, required: true, default: true })
+  newMessages!: boolean;
+
+  @Prop({ type: Boolean, required: true, default: true })
+  statusChanges!: boolean;
+
+  @Prop({ type: Boolean, required: true, default: true })
+  sessionExpiry!: boolean;
+}
+export const SiteNotificationTogglesSchema = SchemaFactory.createForClass(
+  SiteNotificationToggles,
+);
+
 @Schema({ _id: false })
 export class SoundNotificationSettings {
+  // Direct user request to add the desktop-popup toggle DEFAULTS here too,
+  // alongside the pre-existing 6 sound events, even though a desktop popup
+  // is inherently a per-browser concern — same "site sets the default, an
+  // Agent may override" model this session applied to the sound events
+  // themselves.
+  @Prop({ type: SiteNotificationTogglesSchema, required: true, default: () => ({}) })
+  notifications!: SiteNotificationToggles;
+
   @Prop({
     type: SiteSoundSettingSchema,
     required: true,
@@ -113,6 +149,37 @@ export const SoundNotificationSettingsSchema = SchemaFactory.createForClass(
 );
 
 /**
+ * Site-scoped Idle Timeout default — same 4 fields/validation as the
+ * per-user `IdleTimeoutSettings` (`user.schema.ts`), shared by every
+ * Agent/Admin viewing this Site who has no personal override permission
+ * (`idle_timeout.view`/`.manage`) or hasn't been granted one. Field shape
+ * mirrors `IdleTimeoutSettings` verbatim, same as `SoundNotificationSettings`
+ * mirrors `NotificationSounds` above.
+ */
+@Schema({ _id: false })
+export class SiteIdleTimeoutSettings {
+  @Prop({ type: Boolean, required: true, default: false })
+  enabled!: boolean;
+
+  @Prop({ type: Boolean, required: true, default: true })
+  ignoreIfChatting!: boolean;
+
+  @Prop({ type: Number, required: true, default: 5, min: 1, max: 480 })
+  inactivityMinutes!: number;
+
+  @Prop({
+    type: String,
+    required: true,
+    enum: ['away', 'invisible'],
+    default: 'away',
+  })
+  idleStatus!: 'away' | 'invisible';
+}
+export const SiteIdleTimeoutSettingsSchema = SchemaFactory.createForClass(
+  SiteIdleTimeoutSettings,
+);
+
+/**
  * Site — SRS §4.1. One of the 4 brand websites; the primary Site-scoped
  * multi-tenant boundary beneath Organization.
  */
@@ -145,6 +212,9 @@ export class Site {
 
   @Prop({ type: SoundNotificationSettingsSchema, default: () => ({}) })
   soundNotificationSettings!: SoundNotificationSettings;
+
+  @Prop({ type: SiteIdleTimeoutSettingsSchema, default: () => ({}) })
+  idleTimeoutSettings!: SiteIdleTimeoutSettings;
 
   @Prop({
     type: String,
