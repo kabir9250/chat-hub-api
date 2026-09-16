@@ -6,8 +6,10 @@ import { AuditLogModule } from '../audit-log/audit-log.module';
 import { RbacModule } from '../rbac/rbac.module';
 import { SitesController } from './sites.controller';
 import { BusinessHoursController } from './business-hours.controller';
+import { SoundNotificationsController } from './sound-notifications.controller';
 import { SitesService } from './sites.service';
 import { BusinessHoursService } from './business-hours.service';
+import { SoundNotificationsService } from './sound-notifications.service';
 
 @Module({
   imports: [
@@ -15,7 +17,11 @@ import { BusinessHoursService } from './business-hours.service';
     AuditLogModule,
     RbacModule,
   ],
-  controllers: [SitesController, BusinessHoursController],
-  providers: [SitesService, BusinessHoursService],
+  controllers: [
+    SitesController,
+    BusinessHoursController,
+    SoundNotificationsController,
+  ],
+  providers: [SitesService, BusinessHoursService, SoundNotificationsService],
 })
 export class SitesModule {}

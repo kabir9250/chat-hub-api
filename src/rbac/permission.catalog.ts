@@ -22,6 +22,7 @@ export const PERMISSION_MODULES = [
   'Widget Config',
   'Triggers',
   'Business Hours',
+  'Sound & Notifications',
   'Conversations',
   'Visitors',
   'Leads',
@@ -111,6 +112,22 @@ export const PERMISSION_CATALOG: readonly PermissionDefinition[] = [
     key: 'business_hours.manage',
     module: 'Business Hours',
     description: "Edit a Site's business hours",
+  },
+  {
+    key: 'sound_notifications.view',
+    module: 'Sound & Notifications',
+    description: "View a Site's sound & notification settings",
+  },
+  {
+    key: 'sound_notifications.manage',
+    module: 'Sound & Notifications',
+    description:
+      "Edit a Site's sound & notification settings — shared by every " +
+      'Agent/Admin who views the Site, not a per-user preference. Any ' +
+      'holder of ordinary inbox access to the Site (conversations.view_own/' +
+      '.view_site) can still READ these settings even without this key, ' +
+      'since Agents need to know what sound to play — see ' +
+      'SoundNotificationsController\'s GET route.',
   },
   {
     key: 'conversations.view_own',

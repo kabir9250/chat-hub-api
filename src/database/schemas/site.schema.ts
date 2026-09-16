@@ -1,6 +1,9 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, SchemaTypes, Types } from 'mongoose';
 
+import { SOUND_IDS } from './user.schema';
+import type { SoundId } from './user.schema';
+
 /** Business-hours config embedded on a Site — SRS §4.1. */
 @Schema({ _id: false })
 export class BusinessHoursConfig {
@@ -22,6 +25,92 @@ export class BusinessHoursConfig {
 }
 export const BusinessHoursConfigSchema =
   SchemaFactory.createForClass(BusinessHoursConfig);
+
+/**
+ * Site-scoped sound settings — one `{soundId, volume}` pair per event,
+ * shared by every Agent/Admin viewing this Site (not a per-user
+ * preference — see `NotificationSounds` on `User` for that). Field shape
+ * mirrors `NotificationSounds`/`SoundSetting`/`ChatRequestSoundSetting`
+ * (`user.schema.ts`) verbatim; `soundId`/`volume`/`repeatCount` validated
+ * the same way. Deliberately does NOT include the 4 desktop-notification
+ * toggle booleans or idle-timeout settings from the per-user schema —
+ * those remain individual-agent preferences with no coherent site-level
+ * meaning; only the sound identity/volume/repeat-count — the part that
+ * must sound the same for whoever is logged in — is site-scoped.
+ */
+@Schema({ _id: false })
+export class SiteSoundSetting {
+  @Prop({ type: String, required: true, enum: SOUND_IDS })
+  soundId!: SoundId;
+
+  @Prop({ type: Number, required: true, min: 0, max: 100 })
+  volume!: number;
+}
+export const SiteSoundSettingSchema =
+  SchemaFactory.createForClass(SiteSoundSetting);
+
+@Schema({ _id: false })
+export class SiteChatRequestSoundSetting {
+  @Prop({ type: String, required: true, enum: SOUND_IDS })
+  soundId!: SoundId;
+
+  @Prop({ type: Number, required: true, min: 0, max: 100 })
+  volume!: number;
+
+  @Prop({ type: Number, required: true, min: 1, max: 10, default: 1 })
+  repeatCount!: number;
+}
+export const SiteChatRequestSoundSettingSchema = SchemaFactory.createForClass(
+  SiteChatRequestSoundSetting,
+);
+
+@Schema({ _id: false })
+export class SoundNotificationSettings {
+  @Prop({
+    type: SiteSoundSettingSchema,
+    required: true,
+    default: () => ({ soundId: 'bright-ping', volume: 70 }),
+  })
+  incomingVisitor!: SiteSoundSetting;
+
+  @Prop({
+    type: SiteChatRequestSoundSettingSchema,
+    required: true,
+    default: () => ({ soundId: 'door-knock', volume: 70, repeatCount: 1 }),
+  })
+  chatRequest!: SiteChatRequestSoundSetting;
+
+  @Prop({
+    type: SiteSoundSettingSchema,
+    required: true,
+    default: () => ({ soundId: 'dot-dot', volume: 70 }),
+  })
+  incomingMessage!: SiteSoundSetting;
+
+  @Prop({
+    type: SiteSoundSettingSchema,
+    required: true,
+    default: () => ({ soundId: 'single-dong', volume: 70 }),
+  })
+  automaticStatusChange!: SiteSoundSetting;
+
+  @Prop({
+    type: SiteSoundSettingSchema,
+    required: true,
+    default: () => ({ soundId: 'whistle-tone', volume: 70 }),
+  })
+  triggerActivated!: SiteSoundSetting;
+
+  @Prop({
+    type: SiteSoundSettingSchema,
+    required: true,
+    default: () => ({ soundId: 'flute-note', volume: 70 }),
+  })
+  operatingHoursStartEnd!: SiteSoundSetting;
+}
+export const SoundNotificationSettingsSchema = SchemaFactory.createForClass(
+  SoundNotificationSettings,
+);
 
 /**
  * Site — SRS §4.1. One of the 4 brand websites; the primary Site-scoped
@@ -53,6 +142,9 @@ export class Site {
 
   @Prop({ type: BusinessHoursConfigSchema, default: () => ({}) })
   businessHoursConfig!: BusinessHoursConfig;
+
+  @Prop({ type: SoundNotificationSettingsSchema, default: () => ({}) })
+  soundNotificationSettings!: SoundNotificationSettings;
 
   @Prop({
     type: String,

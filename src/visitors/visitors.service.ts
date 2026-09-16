@@ -115,6 +115,11 @@ export interface LiveVisitor {
    * yet assigned to a specific Agent (`assignedAgentId: null`) — both cases
    * the frontend buckets as "Unserved". */
   servingAgentName: string | null;
+  /** Direct user request — the Visitors table's "Assign To" picker needs
+   * the actual id (not just the display name) to pre-select the current
+   * holder and to compare-and-swap against on reassign. Same null cases as
+   * `servingAgentName` above. */
+  servingAgentId: string | null;
   departmentName: string | null;
 }
 
@@ -274,6 +279,7 @@ export class VisitorsService {
         conv?.assignedAgentId
           ? (agentNames.get(conv.assignedAgentId.toString()) ?? null)
           : null,
+        conv?.assignedAgentId ? conv.assignedAgentId.toString() : null,
         conv?.departmentId
           ? (departmentNames.get(conv.departmentId.toString()) ?? null)
           : null,
@@ -403,6 +409,9 @@ export class VisitorsService {
         ? (agentNames.get(activeConversation.assignedAgentId.toString()) ??
             null)
         : null,
+      activeConversation?.assignedAgentId
+        ? activeConversation.assignedAgentId.toString()
+        : null,
       activeConversation?.departmentId
         ? (departmentNames.get(activeConversation.departmentId.toString()) ??
             null)
@@ -417,6 +426,7 @@ export class VisitorsService {
     page: PageVisit | undefined,
     activeConversationId: Types.ObjectId | undefined,
     servingAgentName: string | null,
+    servingAgentId: string | null,
     departmentName: string | null,
   ): LiveVisitor {
     return {
@@ -448,6 +458,7 @@ export class VisitorsService {
         ? activeConversationId.toString()
         : null,
       servingAgentName,
+      servingAgentId,
       departmentName,
     };
   }
