@@ -108,6 +108,12 @@ export interface LiveVisitor {
   pastVisitsCount: number;
   pastChatsCount: number;
   activeConversationId: string | null;
+  /** `activeConversationId`'s own `referenceNumber` — lets the frontend show
+   * the same id for this row that the Inbox/window title/docked chat-head
+   * tab already show for that Conversation (`displayLabel.ts`'s FR-P2-ID-01
+   * rule), instead of a raw Mongo `_id` fragment that appears nowhere else
+   * in the console. `null` whenever `activeConversationId` is `null`. */
+  activeConversationReferenceNumber: string | null;
   /** Visitors "Group by Serving agent"/"Group by Department" (this
    * session) — the Agent/Department of the Visitor's `activeConversationId`
    * Conversation, if any. `null` whenever there's no active Conversation
@@ -244,7 +250,7 @@ export class VisitorsService {
         // Visitors "Group by Serving agent"/"Group by Department" (this
         // session) — pulled alongside `_id` so the caller can resolve a
         // display name for each without a second round-trip per row.
-        .select('_id visitorId assignedAgentId departmentId')
+        .select('_id visitorId referenceNumber assignedAgentId departmentId')
         .lean()
         .exec(),
     ]);
@@ -276,6 +282,7 @@ export class VisitorsService {
         siteId,
         pageByVisitor.get(v._id.toString()),
         conv?._id,
+        conv?.referenceNumber,
         conv?.assignedAgentId
           ? (agentNames.get(conv.assignedAgentId.toString()) ?? null)
           : null,
@@ -390,7 +397,7 @@ export class VisitorsService {
           status: { $ne: 'closed' },
         })
         .sort({ startedAt: -1 })
-        .select('_id assignedAgentId departmentId')
+        .select('_id referenceNumber assignedAgentId departmentId')
         .lean()
         .exec(),
     ]);
@@ -405,6 +412,7 @@ export class VisitorsService {
       siteId,
       openPage ?? undefined,
       activeConversation?._id,
+      activeConversation?.referenceNumber,
       activeConversation?.assignedAgentId
         ? (agentNames.get(activeConversation.assignedAgentId.toString()) ??
             null)
@@ -425,6 +433,7 @@ export class VisitorsService {
     siteId: string,
     page: PageVisit | undefined,
     activeConversationId: Types.ObjectId | undefined,
+    activeConversationReferenceNumber: string | undefined,
     servingAgentName: string | null,
     servingAgentId: string | null,
     departmentName: string | null,
@@ -457,6 +466,7 @@ export class VisitorsService {
       activeConversationId: activeConversationId
         ? activeConversationId.toString()
         : null,
+      activeConversationReferenceNumber: activeConversationReferenceNumber ?? null,
       servingAgentName,
       servingAgentId,
       departmentName,
