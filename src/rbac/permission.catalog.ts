@@ -23,6 +23,8 @@ export const PERMISSION_MODULES = [
   'Triggers',
   'Business Hours',
   'Sound & Notifications',
+  'Idle Timeout',
+  'Email Reports',
   'Conversations',
   'Visitors',
   'Leads',
@@ -127,7 +129,38 @@ export const PERMISSION_CATALOG: readonly PermissionDefinition[] = [
       'holder of ordinary inbox access to the Site (conversations.view_own/' +
       '.view_site) can still READ these settings even without this key, ' +
       'since Agents need to know what sound to play — see ' +
-      'SoundNotificationsController\'s GET route.',
+      "SoundNotificationsController's GET route.",
+  },
+  // Direct user request — catalog-only additions alongside
+  // sound_notifications.*, reserved for a future site-scoped Idle Timeout
+  // admin screen (mirroring the per-user IdleTimeoutSettings that already
+  // exists on User, same as sound_notifications mirrors the per-user
+  // NotificationSounds). Not wired to any controller/route yet, and not
+  // granted to any seeded Role by default (not even Owner via
+  // ALL_PERMISSION_KEYS is meaningful here since there is nothing to view/
+  // manage yet) — an Owner enables it manually per-Role once the feature
+  // exists.
+  {
+    key: 'idle_timeout.view',
+    module: 'Idle Timeout',
+    description: "View a Site's idle timeout settings",
+  },
+  {
+    key: 'idle_timeout.manage',
+    module: 'Idle Timeout',
+    description: "Edit a Site's idle timeout settings",
+  },
+  // Direct user request — same reservation as idle_timeout.* above, for a
+  // future site-scoped Email Reports admin screen.
+  {
+    key: 'email_reports.view',
+    module: 'Email Reports',
+    description: "View a Site's email report settings",
+  },
+  {
+    key: 'email_reports.manage',
+    module: 'Email Reports',
+    description: "Edit a Site's email report settings",
   },
   {
     key: 'conversations.view_own',

@@ -12,27 +12,23 @@ import { Role, RoleDocument } from '../../database/schemas/role.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { AuditLogService } from '../../audit-log/audit-log.service';
 import { AuthenticatedUser } from '../../auth/interfaces/authenticated-user.interface';
-import {
-  ALL_PERMISSION_KEYS,
-  PermissionKey,
-  isPermissionKey,
-} from '../permission.catalog';
+import { ALL_PERMISSION_KEYS, isPermissionKey } from '../permission.catalog';
 import { PermissionsService } from '../permissions.service';
 import { CreateRoleDto } from './dto/create-role.dto';
 import { UpdateRoleDto } from './dto/update-role.dto';
 
 /**
- * RolesService — FR-RBAC-03/04, and the FR-RBAC-09(a) privilege-escalation
- * guard for Role create/edit.
+ * RolesService — FR-RBAC-03/04.
  *
- * Reachability (does the caller have `roles.manage` at all) is already
- * enforced by `PermissionGuard` on the controller — this service only
- * needs to enforce the *second*, finer-grained half of FR-RBAC-09(a):
- * even a `roles.manage` holder cannot put a permission into a Role's
- * `permissions` array that they do not themselves currently hold anywhere
- * in the Organization. Without this, a `roles.manage`-only admin could
- * edit any Role (e.g. one already assigned to themselves) to add
- * `role_assignments.manage` or anything else and instantly self-escalate.
+ * Reachability (does the caller have `roles.manage` at all) is enforced by
+ * `PermissionGuard` on the controller. The FR-RBAC-09(a) privilege-
+ * escalation guard that used to live here — a `roles.manage` holder could
+ * not put a permission into a Role's `permissions` array that they didn't
+ * themselves currently hold — was removed by direct user request (a
+ * pre-existing Owner account whose stored Role document predated new
+ * catalog keys, e.g. `sound_notifications.*`, could not grant those keys
+ * to itself). Any `roles.manage` holder can now grant any catalog
+ * permission to any Role, including ones they don't hold themselves.
  */
 @Injectable()
 export class RolesService {
@@ -62,7 +58,6 @@ export class RolesService {
     dto: CreateRoleDto,
   ): Promise<RoleDocument> {
     this.validateCatalogKeys(dto.permissions);
-    await this.assertNotEscalating(actor, dto.permissions);
 
     const role = await this.roleModel.create({
       organizationId: actor.organizationId,
@@ -93,7 +88,6 @@ export class RolesService {
 
     if (dto.permissions) {
       this.validateCatalogKeys(dto.permissions);
-      await this.assertNotEscalating(actor, dto.permissions);
 
       // FR-RBAC-09(b): if this edit would remove `role_assignments.manage`
       // from a Role that currently grants it, make sure at least one
@@ -183,22 +177,6 @@ export class RolesService {
     if (invalid.length > 0) {
       throw new BadRequestException(
         `Unknown permission key(s): ${invalid.join(', ')}. Valid keys: ${ALL_PERMISSION_KEYS.join(', ')}`,
-      );
-    }
-  }
-
-  /** FR-RBAC-09(a): a Role's permissions can never exceed what the acting User already holds. */
-  private async assertNotEscalating(
-    actor: AuthenticatedUser,
-    permissions: string[],
-  ): Promise<void> {
-    const actorPermissions = new Set<PermissionKey>(
-      await this.permissionsService.getEffectivePermissions(actor.userId, null),
-    );
-    const notHeld = permissions.filter((p) => !actorPermissions.has(p));
-    if (notHeld.length > 0) {
-      throw new ForbiddenException(
-        `Cannot grant permission(s) you do not hold yourself: ${notHeld.join(', ')}.`,
       );
     }
   }
