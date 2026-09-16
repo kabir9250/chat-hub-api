@@ -8,6 +8,8 @@ import {
   MessageSchema,
   Site,
   SiteSchema,
+  User,
+  UserSchema,
   Visitor,
   VisitorSchema,
 } from '../database/schemas';
@@ -22,6 +24,7 @@ import { TicketsService } from './tickets.service';
       { name: Visitor.name, schema: VisitorSchema },
       { name: Message.name, schema: MessageSchema },
       { name: Site.name, schema: SiteSchema },
+      { name: User.name, schema: UserSchema },
     ]),
     RbacModule,
   ],

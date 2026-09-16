@@ -105,6 +105,15 @@ export interface LiveVisitor {
   landingPage: string | null;
   firstSeenAt: string;
   lastSeenAt: string;
+  /** "Online" column fix — when the Visitor's CURRENT socket connection
+   * streak began (`VisitorPresenceService.getConnectedAt`), not to be
+   * confused with `firstSeenAt` (their very first-ever visit). Resets to
+   * "now" on every fresh zero→one reconnect, e.g. closing and reopening the
+   * tab. Only ever populated for a Visitor this row already knows is online
+   * (this endpoint only returns online Visitors to begin with), so `null`
+   * here should only happen on the rare race where presence expired between
+   * the online-id lookup and this row being built. */
+  onlineSince: string | null;
   pastVisitsCount: number;
   pastChatsCount: number;
   activeConversationId: string | null;
@@ -461,6 +470,7 @@ export class VisitorsService {
       landingPage: v.landingPage ?? null,
       firstSeenAt: v.firstSeenAt.toISOString(),
       lastSeenAt: v.lastSeenAt.toISOString(),
+      onlineSince: this.visitorPresenceService.getConnectedAt(v._id.toString()),
       pastVisitsCount: v.pastVisitsCount,
       pastChatsCount: v.pastChatsCount,
       activeConversationId: activeConversationId

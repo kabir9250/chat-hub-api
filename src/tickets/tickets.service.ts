@@ -8,8 +8,11 @@ import {
   ConversationSubmissionChannel,
   Message,
   MessageDocument,
+  MessageSenderType,
   Site,
   SiteDocument,
+  User,
+  UserDocument,
   Visitor,
   VisitorDocument,
 } from '../database/schemas';
@@ -23,6 +26,14 @@ export interface TicketListItem {
   status: ConversationDocument['status'];
   startedAt: Date;
   visitor: VisitorDocument;
+}
+
+export interface TranscriptMessage {
+  senderType: MessageSenderType;
+  senderName: string | null;
+  body: string | null;
+  hasAttachment: boolean;
+  sentAt: Date;
 }
 
 /**
@@ -50,6 +61,7 @@ export class TicketsService {
     @InjectModel(Message.name)
     private readonly messageModel: Model<MessageDocument>,
     @InjectModel(Site.name) private readonly siteModel: Model<SiteDocument>,
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
   ) {}
 
   async findAllForSite(
@@ -109,12 +121,18 @@ export class TicketsService {
    * time; a Ticket's transcript should always reflect the Conversation's
    * current, full message history, including Conversations that never
    * qualified as a Lead at all (an offline submission with no name/email).
+   *
+   * Per-message `senderName` resolved from each Message's OWN `senderId`
+   * (agent) or the Conversation's Visitor (visitor) — same
+   * "never label by the Conversation's CURRENT assignee" convention
+   * `ConversationsService.resolveSenderNames` already established, so a
+   * later reassignment can't silently relabel an earlier Agent's messages.
    */
   async getTranscript(
     actor: AuthenticatedUser,
     siteId: string,
     conversationId: string,
-  ): Promise<string | null> {
+  ): Promise<{ messages: TranscriptMessage[] }> {
     const site = await this.assertSite(actor, siteId);
 
     const conversation = await this.conversationModel
@@ -124,15 +142,50 @@ export class TicketsService {
       throw new NotFoundException('Conversation not found on this Site.');
     }
 
-    const messages = await this.messageModel
-      .find({ conversationId: conversation._id })
-      .sort({ sentAt: 1 })
-      .exec();
-    if (messages.length === 0) return null;
+    const [messages, visitor] = await Promise.all([
+      this.messageModel
+        .find({ conversationId: conversation._id })
+        .sort({ sentAt: 1 })
+        .exec(),
+      this.visitorModel.findById(conversation.visitorId).exec(),
+    ]);
+    if (messages.length === 0) return { messages: [] };
 
-    return messages
-      .map((m) => `[${m.senderType}] ${m.body ?? '(attachment)'}`)
-      .join('\n');
+    const agentIds = Array.from(
+      new Set(
+        messages
+          .filter((m) => m.senderType === 'agent' && m.senderId)
+          .map((m) => m.senderId!.toString()),
+      ),
+    );
+    const agentNames =
+      agentIds.length === 0
+        ? new Map<string, string>()
+        : new Map(
+            (
+              await this.userModel
+                .find({ _id: { $in: agentIds } }, 'displayName')
+                .lean()
+                .exec()
+            ).map((u) => [u._id.toString(), u.displayName] as const),
+          );
+
+    const visitorName = visitor?.name ?? visitor?.email ?? 'Visitor';
+
+    return {
+      messages: messages.map((m) => ({
+        senderType: m.senderType,
+        senderName:
+          m.senderType === 'agent'
+            ? (m.senderId && agentNames.get(m.senderId.toString())) || null
+            : m.senderType === 'visitor'
+              ? visitorName
+              : null,
+        body: m.body,
+        hasAttachment: m.attachments.length > 0,
+        sentAt: m.sentAt,
+      })),
+    };
   }
 
   /** Same convention `AnalyticsService.applyDateRange`/`endOfDayIfBareDate`

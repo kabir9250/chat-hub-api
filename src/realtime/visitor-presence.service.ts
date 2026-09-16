@@ -59,11 +59,28 @@ export class VisitorPresenceService {
   // expires anyone whose last heartbeat is older than its threshold, closing
   // the same gap `disconnect` was supposed to but sometimes doesn't.
   private readonly lastHeartbeatAt = new Map<string, number>();
+  // "Online" column fix (Agent Console Visitors list) — the live list used
+  // to display `Visitor.firstSeenAt` (the Visitor document's one-time
+  // creation timestamp, set once ever and never updated again) as if it
+  // were "how long has this session been open," so a returning visitor who
+  // reconnected seconds ago still showed hours/days of "Online" time.
+  // Tracked here instead, alongside the rest of in-memory presence: set on
+  // the zero→one (`wentOnline`) transition in `addConnection`, cleared
+  // whenever the Visitor goes fully offline (`removeConnection`/
+  // `forceExpire`) so the NEXT reconnect gets a fresh "online since now."
+  private readonly connectedAt = new Map<string, number>();
 
   /** Records/refreshes "this Visitor is still really there" — called both
    * on connect (see `addConnection`) and on every `visitor:heartbeat`. */
   touchHeartbeat(visitorId: string): void {
     this.lastHeartbeatAt.set(visitorId, Date.now());
+  }
+
+  /** ISO timestamp of when this Visitor's CURRENT online streak began, or
+   * `null` if they're not currently tracked as online at all. */
+  getConnectedAt(visitorId: string): string | null {
+    const ts = this.connectedAt.get(visitorId);
+    return ts ? new Date(ts).toISOString() : null;
   }
 
   /** Every currently-tracked Visitor whose last heartbeat is older than
@@ -95,6 +112,7 @@ export class VisitorPresenceService {
     this.siteByVisitor.delete(visitorId);
     this.foregroundConversation.delete(visitorId);
     this.lastHeartbeatAt.delete(visitorId);
+    this.connectedAt.delete(visitorId);
     return siteId ? { siteId } : null;
   }
 
@@ -115,6 +133,9 @@ export class VisitorPresenceService {
     sockets.add(socketId);
     this.siteByVisitor.set(visitorId, siteId);
     this.touchHeartbeat(visitorId);
+    if (wentOnline) {
+      this.connectedAt.set(visitorId, Date.now());
+    }
     return wentOnline;
   }
 
@@ -144,6 +165,7 @@ export class VisitorPresenceService {
       // narrower foreground signal).
       this.foregroundConversation.delete(visitorId);
       this.lastHeartbeatAt.delete(visitorId);
+      this.connectedAt.delete(visitorId);
     }
     return siteId ? { siteId, wentOffline } : null;
   }
