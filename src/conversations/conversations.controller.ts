@@ -32,6 +32,7 @@ import { CreateConversationDto } from './dto/create-conversation.dto';
 import { ListConversationsQueryDto } from './dto/list-conversations.query.dto';
 import { UpdateConversationStatusDto } from './dto/update-status.dto';
 import { AssignConversationDto } from './dto/assign-conversation.dto';
+import { AssignVisitorDto } from './dto/assign-visitor.dto';
 import { TagConversationDto } from './dto/tag-conversation.dto';
 import { CreateMessageDto } from './dto/create-message.dto';
 import { SubmitRatingDto } from './dto/submit-rating.dto';
@@ -165,6 +166,35 @@ export class ConversationsController {
       conversationId,
       dto.agentId,
       dto.expectedCurrentAgentId,
+    );
+  }
+
+  @ApiOperation({
+    summary:
+      'Assign a Visitor to an Agent (conversations.assign) — creates a ' +
+      "Conversation if the Visitor doesn't have an open one yet",
+    description:
+      'Direct user request — the Visitors list "Assign To" picker also works ' +
+      'for a Visitor who is only browsing, with no Conversation yet. If one is ' +
+      'already open it is reassigned (identical to PATCH .../assign); ' +
+      'otherwise a new Conversation is created, assigned to agentId, with no ' +
+      'initial message.',
+  })
+  @ApiBearerAuth('access-token')
+  @ApiParam(SITE_ID_PARAM)
+  @Post('assign-visitor')
+  @UseGuards(JwtAuthGuard, PermissionGuard)
+  @RequirePermission('conversations.assign')
+  assignVisitor(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('siteId') siteId: string,
+    @Body() dto: AssignVisitorDto,
+  ) {
+    return this.conversationsService.assignVisitorToAgent(
+      user,
+      siteId,
+      dto.visitorId,
+      dto.agentId,
     );
   }
 

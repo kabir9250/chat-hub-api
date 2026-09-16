@@ -176,6 +176,72 @@ export type RealtimeDomainEvent =
       conversationId: string | null;
       pageUrl: string;
       pageCategory: string | null;
+      /** Visitors "Group by Page title" (this session) — see
+       * `PageVisit.pageTitle`'s doc comment. */
+      pageTitle: string | null;
+      timestamp: string;
+    }
+  | {
+      // Session Feature-1b-backend (SRS "12-zendesk-feature-parity" §1.2,
+      // "Incoming visitor," sound-only) — fires on Visitor session init
+      // (FR-VIS-01), before any Conversation exists, so an Agent watching
+      // this Site can hear a chime the moment a new browser tab lands, not
+      // only once a chat starts. Broadcast to `siteAlertRoom`, same
+      // ambient-site-presence scoping as `visitor.siteActivity`/
+      // `visitor.online` — no `conversations.view_site` permission gate,
+      // every Agent/Supervisor/Owner already auto-joins that room.
+      kind: 'visitor.incoming';
+      siteId: string;
+      visitorId: string;
+      isReturningVisitor: boolean;
+      timestamp: string;
+    }
+  | {
+      // Session Feature-1b-backend — SRS §1.2 "Trigger activated"
+      // (sound-only). A Trigger's condition/action evaluation happens
+      // client-side in the Widget (see `chat-hub-web/src/widget/
+      // triggers.ts`) — the server has no independent way to observe a
+      // match — so this is relayed from a Visitor-originated WS event
+      // (`visitor:trigger_activated`, RealtimeGateway) rather than raised
+      // from server-side trigger logic the way every other event here is.
+      // Re-validated against the real Trigger document (siteId + isEnabled)
+      // before broadcast — see that handler's doc comment — so a
+      // malicious/buggy Visitor client can't spam an arbitrary sound event.
+      kind: 'trigger.activated';
+      siteId: string;
+      visitorId: string;
+      triggerId: string;
+      triggerName: string;
+      timestamp: string;
+    }
+  | {
+      // Session Feature-1b-backend — SRS §1.2 "Operating hours start/end"
+      // (sound-only). Emitted when `RealtimeGateway`'s periodic sweep (the
+      // SAME interval `sweepStaleVisitors` already runs on, per this
+      // session's guardrail — no new scheduler) sees a Site's
+      // `isWithinBusinessHours` result flip since its last tick, reusing
+      // FR-HRS-01's own boundary computation (`business-hours.util.ts`)
+      // rather than duplicating it.
+      kind: 'businessHours.boundaryCrossed';
+      siteId: string;
+      nowOpen: boolean;
+      timestamp: string;
+    }
+  | {
+      // Session Feature-1c-backend — SRS §1.3 (Idle Timeout) triggers this
+      // the moment a User's status auto-changes from inactivity; SRS §1.2's
+      // "Status changes" desktop toggle (`User.notificationPreferences
+      // .statusChanges`) and "Automatic status change" sound
+      // (`.sounds.automaticStatusChange`) both listen for exactly this event
+      // — see PresenceService.setIdleStatus, the only place this is ever
+      // emitted. Personal, not Site-wide (broadcast to the User's own
+      // `agentRoom`, same scoping `conversation.created`'s
+      // `assignedAgentId` branch uses) — nobody but the affected Agent
+      // themself should hear their own idle chime.
+      kind: 'presence.autoStatusChanged';
+      userId: string;
+      status: 'away';
+      previousStatus: 'online' | 'away' | 'offline';
       timestamp: string;
     };
 

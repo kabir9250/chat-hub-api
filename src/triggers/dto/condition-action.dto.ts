@@ -53,11 +53,29 @@ export class ActionDto {
     example: 'Questions about pricing? I can help!',
     description:
       'Message text for showProactiveMessage/sendConciergeMessage, a ' +
-      'departmentId for setDepartment, or a tag string for addTag. Unused ' +
-      'by autoOpenWidget.',
+      'departmentId for setDepartment/setVisitorDepartment, a tag string ' +
+      'for addTag/removeTag, the new name for setVisitorName, note text ' +
+      'for replaceNote/appendNote, whole seconds for wait, or an optional ' +
+      'ban reason for blockVisitor. Unused by autoOpenWidget/setTriggered.',
   })
   @IsOptional()
   @IsString()
   @MaxLength(1000)
   value?: string;
+
+  // Session Feature-2c-complex-actions — SRS §2.2's reference row for "Send
+  // message to visitor" shows a distinct "from" sender-name field alongside
+  // the message text ("Send message to visitor | Customer Service | <text>").
+  // Only meaningful for showProactiveMessage; every other action type
+  // ignores it if given.
+  @ApiPropertyOptional({
+    example: 'Customer Service',
+    description:
+      'Sender name shown alongside a showProactiveMessage bubble. Ignored ' +
+      'by every other action type.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  fromName?: string;
 }

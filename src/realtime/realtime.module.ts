@@ -1,12 +1,22 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 
-import { User, UserSchema } from '../database/schemas';
+import {
+  Site,
+  SiteSchema,
+  Trigger,
+  TriggerSchema,
+  User,
+  UserSchema,
+  Visitor,
+  VisitorSchema,
+} from '../database/schemas';
 import { AuthModule } from '../auth/auth.module';
 import { RbacModule } from '../rbac/rbac.module';
 import { ConversationsModule } from '../conversations/conversations.module';
 import { PageVisitsModule } from '../page-visits/page-visits.module';
 import { VisitorsModule } from '../visitors/visitors.module';
+import { TriggersModule } from '../triggers/triggers.module';
 import { PresenceModule } from './presence.module';
 import { RealtimeEventsModule } from './realtime-events.module';
 import { VisitorPresenceModule } from './visitor-presence.module';
@@ -32,7 +42,17 @@ import { IpVisitorIdentityGuardModule } from '../common/rate-limit/ip-visitor-id
  */
 @Module({
   imports: [
-    MongooseModule.forFeature([{ name: User.name, schema: UserSchema }]),
+    MongooseModule.forFeature([
+      { name: User.name, schema: UserSchema },
+      // Session Feature-1b-backend additions — see RealtimeGateway's
+      // constructor doc comment for what each backs.
+      { name: Trigger.name, schema: TriggerSchema },
+      { name: Site.name, schema: SiteSchema },
+      // RealtimeGateway.handleVisitorTriggerActivated loads the full Visitor
+      // to execute the matched Trigger's server-side actions — see the
+      // gateway constructor's doc comment.
+      { name: Visitor.name, schema: VisitorSchema },
+    ]),
     AuthModule,
     RbacModule,
     PresenceModule,
@@ -55,6 +75,12 @@ import { IpVisitorIdentityGuardModule } from '../common/rate-limit/ip-visitor-id
     // decision), shared with VisitorSessionModule via this same leaf module
     // so both resolve one singleton (see its own doc comment).
     IpVisitorIdentityGuardModule,
+    // Session Feature-2c-complex-actions — RealtimeGateway now executes a
+    // matched Trigger's server-side actions (TriggerActionExecutorService)
+    // from handleVisitorTriggerActivated. Not a cycle: TriggersModule
+    // imports only AuditLogModule/RbacModule/PresenceModule/VisitorsModule,
+    // none of which import this module.
+    TriggersModule,
   ],
   providers: [RealtimeGateway, WsRateLimiterService],
 })

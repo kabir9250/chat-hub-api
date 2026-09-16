@@ -17,7 +17,7 @@ import {
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { Server, Socket } from 'socket.io';
 
 import { AppJwtPayload } from '../auth/interfaces/jwt-payload.interface';
@@ -25,7 +25,18 @@ import { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interfa
 import { AuthenticatedVisitor } from '../auth/guards/visitor-auth.guard';
 import { WsJwtGuard } from '../auth/guards/ws-jwt.guard';
 import { WsVisitorGuard } from '../auth/guards/ws-visitor.guard';
-import { User, UserDocument } from '../database/schemas';
+import {
+  Site,
+  SiteDocument,
+  Trigger,
+  TriggerDocument,
+  User,
+  UserDocument,
+  Visitor,
+  VisitorDocument,
+} from '../database/schemas';
+import { TriggerActionExecutorService } from '../triggers/trigger-action-executor.service';
+import { isWithinBusinessHours } from '../sites/business-hours.util';
 import { PermissionGuard } from '../rbac/guards/permission.guard';
 import { RequirePermission } from '../rbac/decorators/require-permission.decorator';
 import { PermissionsService } from '../rbac/permissions.service';
@@ -196,6 +207,15 @@ export class RealtimeGateway
   private static readonly STALE_SWEEP_INTERVAL_MS = 30_000;
   private staleSweepTimer?: ReturnType<typeof setInterval>;
 
+  // Session Feature-1b-backend (SRS §1.2, "Operating hours start/end") —
+  // last-known `isWithinBusinessHours` result per Site, so the sweep below
+  // can detect a CROSSING (not just the current state) without a DB write.
+  // In-memory/per-process, same lifetime/tradeoffs as `PresenceService`'s
+  // online map — a restart re-seeds silently on the next tick with no
+  // spurious boundary-crossed event (see `sweepBusinessHoursBoundaries`'s
+  // doc comment).
+  private readonly lastKnownWithinBusinessHours = new Map<string, boolean>();
+
   @WebSocketServer()
   server: Server;
 
@@ -211,6 +231,18 @@ export class RealtimeGateway
     private readonly visitorsService: VisitorsService,
     private readonly wsRateLimiter: WsRateLimiterService,
     private readonly ipVisitorIdentityGuard: IpVisitorIdentityGuardService,
+    // Session Feature-1b-backend additions — Trigger for validating
+    // `visitor:trigger_activated` (siteId + isEnabled, see that handler),
+    // Site for the business-hours boundary sweep.
+    @InjectModel(Trigger.name)
+    private readonly triggerModel: Model<TriggerDocument>,
+    @InjectModel(Site.name) private readonly siteModel: Model<SiteDocument>,
+    // Session Feature-2c-complex-actions — handleVisitorTriggerActivated
+    // now loads the full Visitor to execute the matched Trigger's
+    // server-side actions.
+    @InjectModel(Visitor.name)
+    private readonly visitorModel: Model<VisitorDocument>,
+    private readonly triggerActionExecutor: TriggerActionExecutorService,
   ) {}
 
   afterInit() {
@@ -403,11 +435,49 @@ export class RealtimeGateway
             .to(siteAlertRoom(event.siteId))
             .emit('visitor.siteActivity', event);
           break;
+
+        // Session Feature-1b-backend additions (SRS §1.2) — all three new
+        // sound-only events, same `siteAlertRoom` scoping as
+        // `visitor.siteActivity` above (ambient site info, not Conversation
+        // content — every Agent/Supervisor/Owner is already a member).
+        case 'visitor.incoming':
+          this.server
+            .to(siteAlertRoom(event.siteId))
+            .emit('visitor.incoming', event);
+          break;
+        case 'trigger.activated':
+          this.server
+            .to(siteAlertRoom(event.siteId))
+            .emit('trigger.activated', event);
+          break;
+        case 'businessHours.boundaryCrossed':
+          this.server
+            .to(siteAlertRoom(event.siteId))
+            .emit('businessHours.boundaryCrossed', event);
+          break;
+
+        // Session Feature-1c-backend (SRS §1.3) — personal, not Site-wide:
+        // only the affected Agent's own `agentRoom` (every socket for that
+        // User, e.g. multiple open tabs) should hear their own idle chime.
+        // This is also what completes SRS §1.2's "Status changes"/
+        // "Automatic status change" wiring — the client-side notification
+        // code (Feature-1b-frontend) listens for this same event name.
+        case 'presence.autoStatusChanged':
+          this.server
+            .to(agentRoom(event.userId))
+            .emit('presence.autoStatusChanged', event);
+          break;
       }
     });
 
     this.staleSweepTimer = setInterval(() => {
       void this.sweepStaleVisitors();
+      // Session Feature-1b-backend (SRS §1.2, task guardrail: "reuse the
+      // existing Business Hours boundary computation rather than building
+      // a new scheduler") — piggybacked on this SAME interval tick rather
+      // than a second `setInterval`. 30s resolution is more than tight
+      // enough for a "business hours just opened/closed" chime.
+      void this.sweepBusinessHoursBoundaries();
     }, RealtimeGateway.STALE_SWEEP_INTERVAL_MS);
   }
 
@@ -452,6 +522,47 @@ export class RealtimeGateway
       this.logger.log(
         `Visitor ${visitorId} force-expired (stale heartbeat, site ${siteId})`,
       );
+    }
+  }
+
+  /**
+   * Session Feature-1b-backend (SRS §1.2, "Operating hours start/end,"
+   * sound-only) — detects a Business Hours boundary CROSSING by re-running
+   * FR-HRS-01's own `isWithinBusinessHours` (`business-hours.util.ts`, the
+   * same function `WidgetBootstrapService.getStatus` uses) for every Site
+   * with Business Hours enabled, and diffing against
+   * `lastKnownWithinBusinessHours`'s last-seen result. Only Sites with
+   * `businessHoursConfig.enabled` are even queried — an unconfigured Site
+   * is always "open," so it can never cross a boundary and there's nothing
+   * to sweep for it.
+   *
+   * A cold start (no entry yet in the map) SEEDS the current state without
+   * broadcasting — there's no real "crossing" to report on the very first
+   * observation, only on a change from a previously-observed state.
+   */
+  private async sweepBusinessHoursBoundaries(): Promise<void> {
+    const sites = await this.siteModel
+      .find({ 'businessHoursConfig.enabled': true })
+      .select('_id businessHoursConfig')
+      .lean()
+      .exec();
+
+    for (const site of sites) {
+      const siteId = site._id.toString();
+      const nowOpen = isWithinBusinessHours(site.businessHoursConfig);
+      const previouslyOpen = this.lastKnownWithinBusinessHours.get(siteId);
+      this.lastKnownWithinBusinessHours.set(siteId, nowOpen);
+
+      if (previouslyOpen === undefined || previouslyOpen === nowOpen) {
+        continue;
+      }
+
+      this.realtimeEvents.emit({
+        kind: 'businessHours.boundaryCrossed',
+        siteId,
+        nowOpen,
+        timestamp: new Date().toISOString(),
+      });
     }
   }
 
@@ -566,10 +677,14 @@ export class RealtimeGateway
       fullName: user.fullName,
       enabled: user.enabled,
       status: user.status,
-      notificationPreferences: {
-        desktopEnabled: user.notificationPreferences.desktopEnabled,
-        soundEnabled: user.notificationPreferences.soundEnabled,
-      },
+      notificationPreferences: user.notificationPreferences,
+      tagline: user.tagline,
+      avatarUrl: user.avatarUrl,
+      preferredLanguage: user.preferredLanguage,
+      chatLimit: user.chatLimit,
+      skills: user.skills,
+      keyboardShortcutsEnabled: user.keyboardShortcutsEnabled,
+      idleTimeoutSettings: user.idleTimeoutSettings,
     };
     (client.data as RealtimeSocketData).user = authUser;
 
@@ -1118,6 +1233,72 @@ export class RealtimeGateway
     return { event: 'presence_set', data: { status: data.status } };
   }
 
+  /**
+   * SRS §1.3 (Idle Timeout) — called by the Agent Console's client-side
+   * inactivity timer (Session Feature-1c-frontend) when `inactivityMinutes`
+   * elapses with no mouse/keyboard/focus activity. Deliberately a separate
+   * event from `agent:presence.set` (guardrail: "do not change the existing
+   * manual presence-toggle behavior — this is additive") rather than a
+   * flag on it, so the manual path's semantics/broadcast/lack-of-
+   * notification stay exactly as they were.
+   *
+   * Re-validates against the caller's OWN `idleTimeoutSettings` server-side
+   * (never trusts a client-asserted "I'm idle, please demote me") — a
+   * disabled setting, or one whose `inactivityMinutes` the client is
+   * somehow out of sync with, is a silent no-op rather than an error (the
+   * client and server clocks/timers are never perfectly synchronized; a
+   * stale/late idle ping losing the race after the Agent moved their mouse
+   * again is a normal, harmless race, same treatment `visitor:trigger_
+   * activated`'s stale-Trigger-id case gets).
+   *
+   * `ignoreIfChatting` is evaluated from `data.hasOpenChatWindows`, which
+   * the CLIENT reports — the server has no visibility into the Agent
+   * Console's floating-window state (Phase 2 §3.2), so this is inherently
+   * client-asserted, same trust boundary the client's inactivity
+   * measurement itself already requires. Worst case of a lying client is
+   * the Agent's own status changing when it shouldn't have — a UX
+   * annoyance to themself, not a security/RBAC concern.
+   */
+  @SubscribeMessage('agent:presence.idle')
+  @UseGuards(WsJwtGuard)
+  async handleIdlePresence(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { hasOpenChatWindows: boolean },
+  ) {
+    const { user } = client.data as RealtimeSocketData;
+    const userId = user!.userId;
+
+    const doc = await this.userModel
+      .findById(userId, { idleTimeoutSettings: 1 })
+      .exec();
+    const settings = doc?.idleTimeoutSettings;
+    if (!settings?.enabled) {
+      return { event: 'presence_idle_ignored', data: { reason: 'disabled' } };
+    }
+    if (settings.ignoreIfChatting && data?.hasOpenChatWindows) {
+      return {
+        event: 'presence_idle_ignored',
+        data: { reason: 'chatting' },
+      };
+    }
+
+    const status = await this.presenceService.setIdleStatus(userId);
+    if (status !== 'away') {
+      // Already away/offline — setIdleStatus no-op'd, nothing to broadcast.
+      return { event: 'presence_idle_ignored', data: { reason: 'no_change' } };
+    }
+
+    const summary =
+      await this.permissionsService.getEffectivePermissionsSummary(userId);
+    this.broadcastPresence(
+      userId,
+      status,
+      Object.keys(summary.sitePermissions),
+    );
+
+    return { event: 'presence_set', data: { status } };
+  }
+
   // -----------------------------------------------------------------------
   // Visitor-side handlers — no PermissionGuard (visitors hold no RBAC
   // permissions, by design); ownership is checked by ConversationsService
@@ -1232,6 +1413,109 @@ export class RealtimeGateway
     this.visitorPresenceService.touchHeartbeat(visitor!.visitorId);
   }
 
+  /**
+   * Session Feature-1b-backend (SRS §1.2, "Trigger activated," sound-only)
+   * — the Widget evaluates a Trigger's conditions/actions entirely
+   * client-side (`chat-hub-web/src/widget/triggers.ts`), so a match is only
+   * ever observable here via what the Visitor's own client reports. Same
+   * trust model as `visitor:page_changed` (this session's task guardrail —
+   * "no live socket test needed" doesn't relax RBAC/validation): the
+   * `triggerId` is re-verified against a real, enabled Trigger belonging to
+   * THIS Visitor's own `siteId` (from the guard, never a client-supplied
+   * value) before anything is broadcast, so a malicious/buggy client can't
+   * spam an arbitrary sound event or probe another Site's Trigger ids.
+   * Silently no-ops on an unknown/disabled/foreign triggerId rather than
+   * throwing — a stale client-side trigger list (config changed mid-session)
+   * is a normal race, not an error worth surfacing to the Visitor.
+   *
+   * Session Feature-2c-complex-actions — this is also now the one place
+   * that gives `TriggerActionExecutorService` a real caller (see
+   * PROGRESS-PHASE2.md: neither engine service had one before this
+   * session). This does NOT re-run condition evaluation server-side
+   * (`TriggerEvaluationService.findMatches` is still unwired) — it executes
+   * the actions of the Trigger the client already matched and this handler
+   * just re-validated, same trust boundary the sound-only broadcast above
+   * already accepted. Deliberately fire-and-forget (`void`, not `await`ed):
+   * a `wait` action can legitimately span many seconds, and this WS handler
+   * must return promptly regardless — the actual mutation still lands
+   * whenever the sequence finishes, same "eventual, not synchronous" shape
+   * a real Zendesk trigger's server-side delay would have.
+   */
+  @SubscribeMessage('visitor:trigger_activated')
+  @UseGuards(WsVisitorGuard)
+  async handleVisitorTriggerActivated(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { triggerId: string },
+  ) {
+    const { visitor } = client.data as RealtimeSocketData;
+    if (!data?.triggerId || !Types.ObjectId.isValid(data.triggerId)) return;
+
+    const trigger = await this.triggerModel
+      .findOne({
+        _id: data.triggerId,
+        siteId: visitor!.siteId,
+        isEnabled: true,
+      })
+      .exec();
+    if (!trigger) return;
+
+    this.realtimeEvents.emit({
+      kind: 'trigger.activated',
+      siteId: visitor!.siteId,
+      visitorId: visitor!.visitorId,
+      triggerId: trigger._id.toString(),
+      triggerName: trigger.name,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (trigger.actions.length > 0) {
+      void this.executeTriggerActions(
+        visitor!.siteId,
+        visitor!.visitorId,
+        trigger,
+      );
+    }
+  }
+
+  /**
+   * The async body split out of `handleVisitorTriggerActivated` above so
+   * that handler can fire this without `await`ing it (see its own doc
+   * comment for why — a `wait` action must not hold the WS handler open).
+   * Loads the Site + Visitor fresh (the handler above only re-validated the
+   * Trigger) and runs `TriggerActionExecutorService.applyAll`, saving the
+   * Visitor once at the end — the same "batch several actions into one
+   * save" reasoning Feature-2c-simple-actions established, now spanning a
+   * possible `wait` delay too. `blockVisitor` is the one action that saves
+   * independently (via `VisitorsService.banFromTrigger`) before this save
+   * ever runs — see `TriggerActionExecutorService`'s own doc comment.
+   */
+  private async executeTriggerActions(
+    siteId: string,
+    visitorId: string,
+    trigger: TriggerDocument,
+  ): Promise<void> {
+    try {
+      const [site, visitorDoc] = await Promise.all([
+        this.siteModel.findById(siteId).exec(),
+        this.visitorModel.findById(visitorId).exec(),
+      ]);
+      if (!site || !visitorDoc) return;
+
+      await this.triggerActionExecutor.applyAll(
+        site,
+        visitorDoc,
+        trigger.actions,
+      );
+      await visitorDoc.save();
+    } catch (err) {
+      this.logger.error(
+        `Trigger action execution failed for trigger ${trigger._id.toString()} / visitor ${visitorId}: ${
+          (err as Error)?.message ?? err
+        }`,
+      );
+    }
+  }
+
   @SubscribeMessage('visitor:typing')
   @UseGuards(WsVisitorGuard)
   handleVisitorTyping(
@@ -1263,7 +1547,8 @@ export class RealtimeGateway
   @UseGuards(WsVisitorGuard)
   async handleVisitorPageChanged(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { pageUrl: string; conversationId?: string },
+    @MessageBody()
+    data: { pageUrl: string; conversationId?: string; pageTitle?: string },
   ) {
     const { visitor } = client.data as RealtimeSocketData;
     if (!data?.pageUrl) {
@@ -1275,6 +1560,7 @@ export class RealtimeGateway
         visitorId: visitor!.visitorId,
         conversationId: data.conversationId,
         pageUrl: data.pageUrl,
+        pageTitle: data.pageTitle ?? null,
       });
       return { event: 'page_change_recorded', data: {} };
     } catch (err) {

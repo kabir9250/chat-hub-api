@@ -42,6 +42,12 @@ export interface RecordPageChangeInput {
    */
   conversationId?: string | null;
   pageUrl: string;
+  /** Visitors "Group by Page title" (this session) — the host page's
+   * `document.title`, forwarded from both entry points (`init()`'s full-
+   * page-load case and the WS `visitor:page_changed` SPA-route-change
+   * case) exactly like `pageUrl` already is. Optional/best-effort — see
+   * the schema field's own doc comment. */
+  pageTitle?: string | null;
   attribution?: PageVisitAttributionSnapshot | null;
   /** Per-tab id from the widget's `sessionStorage` (see PageVisit schema's
    * own doc comment) — present on `VisitorSessionService.init()`'s calls,
@@ -124,7 +130,8 @@ export class PageVisitsService {
     // that id over from `previous` (the PageVisit just closed out above) or,
     // if none was open, the Visitor's most recent PageVisit on file, rather
     // than writing this row with no session id at all.
-    let visitSessionId = input.visitSessionId ?? previous?.visitSessionId ?? null;
+    let visitSessionId =
+      input.visitSessionId ?? previous?.visitSessionId ?? null;
     if (!input.visitSessionId && !previous) {
       const latest = await this.pageVisitModel
         .findOne({ visitorId })
@@ -141,6 +148,7 @@ export class PageVisitsService {
       conversationId,
       pageUrl: input.pageUrl,
       pageCategory: derivePageCategory(input.pageUrl),
+      pageTitle: input.pageTitle ?? null,
       enteredAt: now,
       exitedAt: null,
       durationSeconds: null,
@@ -216,6 +224,7 @@ export class PageVisitsService {
       conversationId: conversationId ? conversationId.toString() : null,
       pageUrl: current.pageUrl,
       pageCategory: current.pageCategory,
+      pageTitle: current.pageTitle,
       timestamp: now.toISOString(),
     });
 

@@ -11,6 +11,8 @@ import { JwtService } from '@nestjs/jwt';
 import { Model, Types } from 'mongoose';
 
 import {
+  BannedEntry,
+  BannedEntryDocument,
   Conversation,
   ConversationDocument,
   Message,
@@ -19,6 +21,8 @@ import {
   SiteDocument,
   Visitor,
   VisitorDocument,
+  WidgetConfig,
+  WidgetConfigDocument,
 } from '../database/schemas';
 import { AuditLogService } from '../audit-log/audit-log.service';
 import {
@@ -58,6 +62,9 @@ export interface InitVisitorSessionInput {
   sessionToken?: string;
   pageUrl?: string;
   referrer?: string;
+  /** Visitors "Group by Page title" (this session) — see
+   * `InitVisitorSessionDto.pageTitle`'s doc comment. */
+  pageTitle?: string;
   userAgent?: string;
   ip?: string;
   /** Per-tab id from the widget's `sessionStorage` — see
@@ -104,6 +111,10 @@ export class VisitorSessionService {
     private readonly conversationModel: Model<ConversationDocument>,
     @InjectModel(Message.name)
     private readonly messageModel: Model<MessageDocument>,
+    @InjectModel(WidgetConfig.name)
+    private readonly widgetConfigModel: Model<WidgetConfigDocument>,
+    @InjectModel(BannedEntry.name)
+    private readonly bannedEntryModel: Model<BannedEntryDocument>,
     private readonly jwtService: JwtService,
     private readonly auditLogService: AuditLogService,
     private readonly attributionService: AttributionService,
@@ -152,7 +163,12 @@ export class VisitorSessionService {
     if (!visitorDoc) {
       throw new NotFoundException('Visitor not found on this Site.');
     }
-    if (visitorDoc.isBanned) {
+    if (
+      await this.bannedEntryModel.exists({
+        siteId: visitorDoc.siteId,
+        visitorId: visitorDoc._id,
+      })
+    ) {
       throw new ForbiddenException(
         'This visitor has been banned from starting new chats on this Site.',
       );
@@ -209,13 +225,46 @@ export class VisitorSessionService {
     // FR-VIS-07 / §6.3: enforce the ban list before anything else — a
     // banned IP is blocked from opening a new chat on this Site even if
     // they show up with no visitorId/token at all (cleared cookies).
+    // Feature-2a-backend: checks `BannedEntry` directly instead of
+    // `Site.bannedIps` membership — same enforcement point/ordering, new
+    // source of truth.
     if (
       attribution.currentIp &&
-      site.bannedIps.includes(attribution.currentIp)
+      (await this.bannedEntryModel.exists({
+        siteId: site._id,
+        ipAddress: attribution.currentIp,
+      }))
     ) {
       throw new ForbiddenException(
         'This IP address has been banned from starting new chats on this Site.',
       );
+    }
+
+    // "Web Widget security" tab's Blocked countries feature (direct user
+    // request — "it's been working in zendesk it should work the same way
+    // in my chat-hub app"). Matches Zendesk's own documented behavior
+    // (its own Notice banner: "Blocking countries will only impact the
+    // Chat functionality in the widget") — the widget itself still
+    // bootstraps/loads normally (WidgetBootstrapService is untouched), only
+    // starting an actual chat is refused, same enforcement point/pattern as
+    // the banned-IP check just above. `attribution.location.country` is
+    // the same GeoIP-resolved ISO 3166-1 alpha-2 code already used
+    // everywhere else in this app (visitor-table country flags, etc.);
+    // `blockedCountries` is stored upper-cased by WidgetConfigService, so
+    // this compares directly with no extra normalization.
+    const widgetConfig = await this.widgetConfigModel
+      .findOne({ siteId: site._id })
+      .select('blockedCountriesEnabled blockedCountries')
+      .lean()
+      .exec();
+    if (
+      widgetConfig?.blockedCountriesEnabled &&
+      attribution.location.country &&
+      widgetConfig.blockedCountries.includes(
+        attribution.location.country.toUpperCase(),
+      )
+    ) {
+      throw new ForbiddenException('Chat is not available in your region.');
     }
 
     let visitor = await this.resolveReturningVisitor(
@@ -224,7 +273,13 @@ export class VisitorSessionService {
       site,
     );
 
-    if (visitor?.isBanned) {
+    if (
+      visitor &&
+      (await this.bannedEntryModel.exists({
+        siteId: site._id,
+        visitorId: visitor._id,
+      }))
+    ) {
       throw new ForbiddenException(
         'This visitor has been banned from starting new chats on this Site.',
       );
@@ -245,8 +300,15 @@ export class VisitorSessionService {
     // so one is pre-generated here and reused below for `.create()` rather
     // than letting Mongoose mint a different one after the check passed.
     const pendingNewVisitorId = visitor ? undefined : new Types.ObjectId();
-    const identityIdForGuard = (visitor?._id ?? pendingNewVisitorId!).toString();
-    if (!this.ipVisitorIdentityGuard.checkAndRegister(input.ip, identityIdForGuard)) {
+    const identityIdForGuard = (
+      visitor?._id ?? pendingNewVisitorId!
+    ).toString();
+    if (
+      !this.ipVisitorIdentityGuard.checkAndRegister(
+        input.ip,
+        identityIdForGuard,
+      )
+    ) {
       throw new HttpException(
         { message: TOO_MANY_ACTIVE_SESSIONS_MESSAGE },
         HttpStatus.TOO_MANY_REQUESTS,
@@ -308,6 +370,19 @@ export class VisitorSessionService {
       });
     }
 
+    // Session Feature-1b-backend (SRS "12-zendesk-feature-parity" §1.2,
+    // "Incoming visitor," sound-only) — FR-VIS-01: every `init()` call is a
+    // Visitor session init, whether resuming or brand-new (same "one visit"
+    // definition `totalVisit` below uses), so an Agent watching this Site
+    // can hear a chime as soon as anyone lands, before a chat ever starts.
+    this.realtimeEvents.emit({
+      kind: 'visitor.incoming',
+      siteId: site._id.toString(),
+      visitorId: visitor._id.toString(),
+      isReturningVisitor,
+      timestamp: new Date().toISOString(),
+    });
+
     // FR-RPT-01 (this session) — every `init()` call is one "visit" (a
     // widget load/session bootstrap, whether resuming or brand-new), so
     // `totalVisit` fires unconditionally; `uniqueVisitor` only fires in the
@@ -360,6 +435,7 @@ export class VisitorSessionService {
           visitorId: visitor._id,
           conversationId,
           pageUrl: input.pageUrl,
+          pageTitle: input.pageTitle ?? null,
           visitSessionId: input.visitSessionId ?? null,
           // Session P2-5 redesign — snapshot THIS call's own attribution
           // onto the PageVisit row itself (see that schema's doc comment on

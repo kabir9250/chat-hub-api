@@ -2,12 +2,18 @@ import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 
 import {
+  BannedEntry,
+  BannedEntrySchema,
   Conversation,
   ConversationSchema,
+  Department,
+  DepartmentSchema,
   PageVisit,
   PageVisitSchema,
   Site,
   SiteSchema,
+  User,
+  UserSchema,
   Visitor,
   VisitorSchema,
 } from '../database/schemas';
@@ -31,6 +37,14 @@ import { VisitorsService } from './visitors.service';
       { name: Conversation.name, schema: ConversationSchema },
       // FR-RPT-07's live Visitors list — current page per online Visitor.
       { name: PageVisit.name, schema: PageVisitSchema },
+      // Visitors "Group by Serving agent"/"Group by Department" (this
+      // session) — read-only name lookups for an active Conversation's
+      // assignedAgentId/departmentId.
+      { name: User.name, schema: UserSchema },
+      { name: Department.name, schema: DepartmentSchema },
+      // Feature-2a-backend — ban()/unban()/banIp()/findBanned() now read
+      // and write BannedEntry directly.
+      { name: BannedEntry.name, schema: BannedEntrySchema },
     ]),
     AuditLogModule,
     RbacModule,

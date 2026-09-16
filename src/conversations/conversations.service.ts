@@ -32,6 +32,8 @@ import { AnalyticsEventsService } from '../analytics/analytics-events.service';
 import { PermissionsService } from '../rbac/permissions.service';
 import { LeadsService } from '../leads/leads.service';
 import { PresenceService } from '../realtime/presence.service';
+import { isWithinBusinessHours } from '../sites/business-hours.util';
+import type { ConversationSubmissionChannel } from '../database/schemas';
 import {
   RealtimeEventsService,
   type RealtimeMessagePayload,
@@ -221,19 +223,40 @@ export class ConversationsService {
       );
     }
 
-    const department = dto.departmentId
-      ? await this.departmentModel
-          .findOne({ _id: dto.departmentId, siteId: site._id })
-          .exec()
-      : await this.departmentModel
-          .findOne({ siteId: site._id })
-          .sort({ createdAt: 1 })
-          .exec();
+    // Department resolution order (Session Feature-2c-complex-actions —
+    // "confirm FR-RTE-01's auto-routing respects a Trigger-assigned
+    // Department"):
+    //   1. An explicit `dto.departmentId` — the WIDGET's own client-side
+    //      `setDepartment` trigger action, one-conversation-only (see
+    //      trigger.schema.ts's TRIGGER_ACTION_TYPES comment) — still wins
+    //      when given, exactly as before this session. An explicit id that
+    //      doesn't resolve is still a 400, not a silent fallback.
+    //   2. Else the persistent, server-set `Visitor.department` — the
+    //      "Set visitor department" action (Feature-2b-schema's field) —
+    //      so a Trigger-assigned Department actually reaches routing.
+    //   3. Else the Site's oldest Department, same default as before.
+    let department: DepartmentDocument | null = null;
+    if (dto.departmentId) {
+      department = await this.departmentModel
+        .findOne({ _id: dto.departmentId, siteId: site._id })
+        .exec();
+      if (!department) {
+        throw new BadRequestException('Department not found on this Site.');
+      }
+    } else if (visitorDoc.department) {
+      department = await this.departmentModel
+        .findOne({ _id: visitorDoc.department, siteId: site._id })
+        .exec();
+    }
+    if (!department) {
+      department = await this.departmentModel
+        .findOne({ siteId: site._id })
+        .sort({ createdAt: 1 })
+        .exec();
+    }
     if (!department) {
       throw new BadRequestException(
-        dto.departmentId
-          ? 'Department not found on this Site.'
-          : 'This Site has no Department to route the Conversation to.',
+        'This Site has no Department to route the Conversation to.',
       );
     }
 
@@ -248,11 +271,14 @@ export class ConversationsService {
       department._id,
     );
 
+    const submissionChannel = await this.computeSubmissionChannel(site);
+
     const conversation = await this.conversationModel.create({
       siteId: site._id,
       departmentId: department._id,
       visitorId: visitorDoc._id,
       assignedAgentId,
+      submissionChannel,
       status: assignedAgentId ? 'open' : 'pending',
       startedAt: new Date(),
       referenceNumber,
@@ -367,16 +393,62 @@ export class ConversationsService {
    * who couldn't see the Conversation once assigned would be a broken
    * assignment). Returns `null` (unassigned/pending, FR-RTE-02) if no
    * candidate qualifies.
+   *
+   * Chat Limit (Personal Settings → Profile, this session): a candidate
+   * whose own `User.chatLimit` is set (non-null) and whose current
+   * open+pending count has already reached it is skipped in favor of
+   * another eligible candidate — same least-active loop below, just
+   * excluding at-limit Agents from `best` consideration. `chatLimit: null`
+   * (the default/"not set" state) means no limit, unchanged from before
+   * this field existed — never treated as a limit of zero. If every
+   * eligible Agent is at their limit, falls through to the existing
+   * FR-RTE-02 "leave unassigned/pending" behavior, same as the
+   * no-eligible-candidates case.
    */
+  /**
+   * Tickets screen — real, persisted "online vs offline" signal for a
+   * newly-created Conversation, computed once at creation time using the
+   * exact same definition WidgetBootstrapService.getStatus already uses for
+   * the widget's own "We're online" indicator (FR-WID-09/FR-HRS-01):
+   * within Business Hours (or Business Hours isn't enabled at all) AND at
+   * least one enabled User who belongs to this Site is currently connected.
+   * Site-wide, no Department/permission filtering — deliberately broader
+   * than pickAgentForRouting()'s own eligibility check, which answers "who
+   * can this Conversation be routed to," not "is this Site generally
+   * staffed right now."
+   */
+  private async computeSubmissionChannel(
+    site: SiteDocument,
+  ): Promise<ConversationSubmissionChannel> {
+    if (!isWithinBusinessHours(site.businessHoursConfig)) return 'offline';
+
+    const enabledUsers = await this.userModel
+      .find({ enabled: true })
+      .select('_id')
+      .lean()
+      .exec();
+    for (const u of enabledUsers) {
+      const idStr = u._id.toString();
+      if (!this.presenceService.isOnline(idStr)) continue;
+      if (await this.permissionsService.isUserOnSite(idStr, site._id)) {
+        return 'online';
+      }
+    }
+    return 'offline';
+  }
+
   private async pickAgentForRouting(
     siteId: Types.ObjectId,
     departmentId: Types.ObjectId,
   ): Promise<Types.ObjectId | null> {
     const candidates = await this.userModel
       .find({ departmentId, enabled: true })
-      .select('_id')
+      .select('_id chatLimit')
       .lean()
       .exec();
+    const chatLimitById = new Map<string, number | null>(
+      candidates.map((c) => [c._id.toString(), c.chatLimit ?? null]),
+    );
 
     const onlineCandidateIds = candidates
       .map((c) => c._id.toString())
@@ -409,6 +481,8 @@ export class ConversationsService {
           status: { $in: ['open', 'pending'] },
         })
         .exec();
+      const chatLimit = chatLimitById.get(id) ?? null;
+      if (chatLimit !== null && count >= chatLimit) continue; // at their own Chat Limit — skip in favor of another eligible Agent
       // Ties keep the first (stable, iteration-order) candidate — simple
       // over clever, per the task's own "keep the routing strategy simple"
       // guardrail.
@@ -499,6 +573,7 @@ export class ConversationsService {
     if (query.visitorId) filter.visitorId = new Types.ObjectId(query.visitorId);
 
     if (query.status) filter.status = query.status;
+    if (query.channel) filter.submissionChannel = query.channel;
     if (query.tag) filter.tags = query.tag;
     if (query.rating !== undefined) filter.ratingScore = query.rating;
 
@@ -684,6 +759,7 @@ export class ConversationsService {
         : { $or: scopeConditions };
 
     if (query.status) filter.status = query.status;
+    if (query.channel) filter.submissionChannel = query.channel;
     if (query.tag) filter.tags = query.tag;
     if (query.rating !== undefined) filter.ratingScore = query.rating;
 
@@ -1198,6 +1274,142 @@ export class ConversationsService {
     return updated;
   }
 
+  /**
+   * Direct user request — the Visitors list's "Assign To" picker also needs
+   * to work for a Visitor who is only BROWSING, with no Conversation yet at
+   * all, so a Supervisor/Owner/Team Lead can hand them straight to a
+   * specific Agent instead of that Agent having to notice and claim them.
+   * `assign()` above can't do this — it requires an existing
+   * `conversationId`. This either reassigns an already-open Conversation
+   * (reuses `assign()` verbatim, same compare-and-swap/audit/broadcast) or,
+   * if none exists, creates one the same way `startProactiveConversation`
+   * does (department pick, referenceNumber, pastChatsCount/Lead bookkeeping,
+   * `conversation.created` broadcast) but assigned to `agentId` — never
+   * `actor.userId` — and with NO message, since the actor isn't the one
+   * chatting with this Visitor. The Agent sees it appear in their Inbox
+   * exactly like any other assigned Conversation; nothing is sent to the
+   * Visitor's widget until that Agent actually writes something.
+   */
+  async assignVisitorToAgent(
+    actor: AuthenticatedUser,
+    siteId: string,
+    visitorId: string,
+    agentId: string,
+  ): Promise<ConversationDocument> {
+    const site = await this.assertSite(actor, siteId);
+
+    const agentOnSite = await this.permissionsService.isUserOnSite(
+      agentId,
+      site._id,
+    );
+    if (!agentOnSite) {
+      throw new BadRequestException(
+        'That Agent does not have access to this Site.',
+      );
+    }
+
+    const visitorDoc = await this.visitorModel
+      .findOne({ _id: visitorId, siteId: site._id })
+      .exec();
+    if (!visitorDoc) {
+      throw new NotFoundException('Visitor not found on this Site.');
+    }
+    if (visitorDoc.isBanned) {
+      throw new ForbiddenException(
+        'This visitor has been banned from receiving messages on this Site.',
+      );
+    }
+
+    // Same "send into whatever's already open instead of creating a
+    // duplicate" race guard `startProactiveConversation` applies — the
+    // Visitor may have started their own chat, or another Agent/Admin
+    // already reached out, between this Visitor appearing on the list and
+    // this click landing.
+    const existing = await this.conversationModel
+      .findOne({
+        siteId: site._id,
+        visitorId: visitorDoc._id,
+        status: { $ne: 'closed' },
+      })
+      .exec();
+    if (existing) {
+      return this.assign(
+        actor,
+        siteId,
+        existing._id.toString(),
+        agentId,
+        existing.assignedAgentId?.toString() ?? null,
+      );
+    }
+
+    const department = await this.departmentModel
+      .findOne({ siteId: site._id })
+      .sort({ createdAt: 1 })
+      .exec();
+    if (!department) {
+      throw new BadRequestException(
+        'This Site has no Department to route the Conversation to.',
+      );
+    }
+
+    const referenceNumber = await this.referenceNumberService.next();
+    const conversation = await this.conversationModel.create({
+      siteId: site._id,
+      departmentId: department._id,
+      visitorId: visitorDoc._id,
+      assignedAgentId: new Types.ObjectId(agentId),
+      submissionChannel: 'online',
+      status: 'open',
+      startedAt: new Date(),
+      referenceNumber,
+    });
+
+    visitorDoc.pastChatsCount += 1;
+    await visitorDoc.save();
+    const lead = await this.leadsService.syncLeadForVisitor(visitorDoc);
+    if (
+      lead &&
+      !lead.conversationIds.some((id) => id.equals(conversation._id))
+    ) {
+      lead.conversationIds.push(conversation._id);
+      await lead.save();
+    }
+
+    await this.analyticsEvents.record({
+      siteId: site._id,
+      type: 'chatStarted',
+      visitorId: visitorDoc._id,
+    });
+
+    await this.auditLog.record({
+      actorType: 'user',
+      actorId: actor.userId,
+      action: 'conversation.created',
+      siteId: site._id,
+      targetType: 'Conversation',
+      targetId: conversation._id,
+      metadata: {
+        referenceNumber,
+        departmentId: department._id.toString(),
+        assignedTo: agentId,
+        proactive: false,
+      },
+    });
+
+    this.realtimeEvents.emit({
+      kind: 'conversation.created',
+      siteId: site._id.toString(),
+      departmentId: department._id.toString(),
+      conversationId: conversation._id.toString(),
+      referenceNumber,
+      status: conversation.status,
+      assignedAgentId: agentId,
+      visitorId: visitorDoc._id.toString(),
+    });
+
+    return conversation;
+  }
+
   // ---------------------------------------------------------------------
   // Agent-lock-fix (files/agent-lock-fix/10-conversation-lock-and-assign-
   // column.md) — the two SYSTEM-triggered claims (open/reply) plus the
@@ -1639,6 +1851,10 @@ export class ConversationsService {
       departmentId: department._id,
       visitorId: visitorDoc._id,
       assignedAgentId: new Types.ObjectId(actor.userId),
+      // An Agent-initiated proactive conversation is definitionally
+      // 'online' — the Agent is right there starting it — no computation
+      // needed, unlike the Visitor-initiated create() path.
+      submissionChannel: 'online',
       status: 'open',
       startedAt: new Date(),
       referenceNumber,

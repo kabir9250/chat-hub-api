@@ -6,10 +6,10 @@ import {
   Lead,
   LeadDocument,
   LeadStatus,
-  Site,
-  SiteDocument,
   Visitor,
   VisitorDocument,
+  Site,
+  SiteDocument,
 } from '../database/schemas';
 import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interface';
@@ -34,6 +34,11 @@ export interface LeadListItem {
  * that fact, and to own the one thing Visitor itself doesn't model: a
  * manually-managed `status` (new/contacted/converted/lost, FR-VIS-08) that
  * must never be silently reset just because a Visitor's profile changed.
+ *
+ * Phase 3 SRS §3.1's "Lead Creation Settings" (automatic/manual creation,
+ * transcript visibility, last/first-agent assignment) were built, then
+ * scrapped in favor of a simpler Tickets screen (see `tickets/`) — this
+ * service is back to its original, always-automatic shape.
  */
 @Injectable()
 export class LeadsService {

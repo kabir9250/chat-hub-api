@@ -10,12 +10,14 @@ import { Conversation, ConversationSchema } from './conversation.schema';
 import { Message, MessageSchema } from './message.schema';
 import { WidgetConfig, WidgetConfigSchema } from './widget-config.schema';
 import { Trigger, TriggerSchema } from './trigger.schema';
+import { TriggerFire, TriggerFireSchema } from './trigger-fire.schema';
 import { Lead, LeadSchema } from './lead.schema';
 import { AnalyticsEvent, AnalyticsEventSchema } from './analytics-event.schema';
 import { AuditLog, AuditLogSchema } from './audit-log.schema';
 import { Counter, CounterSchema } from './counter.schema';
 import { PageVisit, PageVisitSchema } from './page-visit.schema';
 import { Shortcut, ShortcutSchema } from './shortcut.schema';
+import { BannedEntry, BannedEntrySchema } from './banned-entry.schema';
 
 export * from './organization.schema';
 export * from './site.schema';
@@ -27,12 +29,14 @@ export * from './conversation.schema';
 export * from './message.schema';
 export * from './widget-config.schema';
 export * from './trigger.schema';
+export * from './trigger-fire.schema';
 export * from './lead.schema';
 export * from './analytics-event.schema';
 export * from './audit-log.schema';
 export * from './counter.schema';
 export * from './page-visit.schema';
 export * from './shortcut.schema';
+export * from './banned-entry.schema';
 
 /**
  * All Mongoose model definitions for the app, in one place — passed to
@@ -50,10 +54,12 @@ export const ALL_MODEL_DEFINITIONS: ModelDefinition[] = [
   { name: Message.name, schema: MessageSchema },
   { name: WidgetConfig.name, schema: WidgetConfigSchema },
   { name: Trigger.name, schema: TriggerSchema },
+  { name: TriggerFire.name, schema: TriggerFireSchema },
   { name: Lead.name, schema: LeadSchema },
   { name: AnalyticsEvent.name, schema: AnalyticsEventSchema },
   { name: AuditLog.name, schema: AuditLogSchema },
   { name: Counter.name, schema: CounterSchema },
   { name: PageVisit.name, schema: PageVisitSchema },
   { name: Shortcut.name, schema: ShortcutSchema },
+  { name: BannedEntry.name, schema: BannedEntrySchema },
 ];

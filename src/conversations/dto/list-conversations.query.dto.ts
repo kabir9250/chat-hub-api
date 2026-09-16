@@ -12,8 +12,14 @@ import {
   Min,
 } from 'class-validator';
 
-import { CONVERSATION_STATUSES } from '../../database/schemas/conversation.schema';
-import type { ConversationStatus } from '../../database/schemas/conversation.schema';
+import {
+  CONVERSATION_STATUSES,
+  CONVERSATION_SUBMISSION_CHANNELS,
+} from '../../database/schemas/conversation.schema';
+import type {
+  ConversationStatus,
+  ConversationSubmissionChannel,
+} from '../../database/schemas/conversation.schema';
 
 /**
  * FR-AGT-09 / FR-CONV-06. All filters optional; pagination defaults to
@@ -27,6 +33,19 @@ export class ListConversationsQueryDto {
   @IsOptional()
   @IsIn(CONVERSATION_STATUSES)
   status?: ConversationStatus;
+
+  @ApiPropertyOptional({
+    enum: CONVERSATION_SUBMISSION_CHANNELS,
+    description:
+      "Filter by submissionChannel — 'offline' narrows to Conversations that " +
+      'came in while no Agent was online/within Business Hours (the ' +
+      "Admin Panel's pending-pill dropdown uses this, combined with " +
+      'status=pending, to show only genuinely-missed chats — see ' +
+      'PendingMenu.tsx).',
+  })
+  @IsOptional()
+  @IsIn(CONVERSATION_SUBMISSION_CHANNELS)
+  channel?: ConversationSubmissionChannel;
 
   @ApiPropertyOptional({
     example: '2026-08-01',
@@ -104,7 +123,7 @@ export class ListConversationsQueryDto {
     // so the query can use the Visitor.nameLower/emailLower indexes. See
     // ConversationsService.findMatchingVisitorIds's own doc comment.
     description:
-      "Prefix (\"starts with\") search over the Visitor's name/email, case-insensitive.",
+      'Prefix ("starts with") search over the Visitor\'s name/email, case-insensitive.',
   })
   @IsOptional()
   @IsString()

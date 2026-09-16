@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 
 import {
+  BannedEntry,
+  BannedEntrySchema,
   Conversation,
   ConversationSchema,
   Message,
@@ -10,6 +12,8 @@ import {
   SiteSchema,
   Visitor,
   VisitorSchema,
+  WidgetConfig,
+  WidgetConfigSchema,
 } from '../database/schemas';
 import { AuditLogModule } from '../audit-log/audit-log.module';
 import { AuthModule } from '../auth/auth.module';
@@ -37,6 +41,12 @@ import { IpVisitorIdentityGuardModule } from '../common/rate-limit/ip-visitor-id
       // Conversation the Visitor actually used during the visit that just
       // ended (see that method's own doc comment).
       { name: Message.name, schema: MessageSchema },
+      // Read-only lookup for the Blocked countries check in init() — see
+      // that method's own doc comment.
+      { name: WidgetConfig.name, schema: WidgetConfigSchema },
+      // Feature-2a-backend — ban enforcement (init()/submitProfile()) now
+      // queries BannedEntry directly instead of Site.bannedIps/isBanned.
+      { name: BannedEntry.name, schema: BannedEntrySchema },
     ]),
     AuditLogModule,
     // Reuses AuthModule's JwtModule registration (same secret/expiry

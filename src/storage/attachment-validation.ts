@@ -78,6 +78,49 @@ function megabytes(bytes: number): string {
   return Number.isInteger(mb) ? String(mb) : mb.toFixed(1);
 }
 
+// Personal Settings → Profile avatar upload (this session, SRS "12-zendesk-
+// feature-parity" §1.1) — reuses this module's own image allow-list
+// (`IMAGE_MIME_TYPES`) rather than inventing a second one, but with its own,
+// much smaller size cap: matches the reference Zendesk screen's own helper
+// text ("Maximum size 100 KB, recommended dimensions 50x50px") — an avatar
+// has no business being anywhere near a 10MB chat-attachment image.
+export const AVATAR_MAX_BYTES = 100 * 1024; // 100KB, matches the reference screen's own copy
+
+/**
+ * Same "validate → the caller saves via StorageService" shape as
+ * `validateUploadedFile` below, deliberately kept separate rather than
+ * parameterizing that one: an avatar is never a chat attachment (no
+ * Conversation, no document-MIME branch, a much smaller cap) and mixing the
+ * two call shapes would make `validateUploadedFile`'s signature murkier for
+ * its one real caller (`AttachmentsService`).
+ */
+export function validateAvatarFile(file?: {
+  mimetype: string;
+  size: number;
+  originalname: string;
+}): void {
+  if (!file) {
+    throw new BadRequestException(
+      'No file was uploaded (expected multipart field "file").',
+    );
+  }
+  if (file.size <= 0) {
+    throw new BadRequestException('Uploaded file is empty.');
+  }
+  if (!isImageMimeType(file.mimetype)) {
+    throw new BadRequestException(
+      `"${file.originalname}" is not an allowed image type (${file.mimetype}). ` +
+        'Allowed: JPG, PNG, GIF, WEBP.',
+    );
+  }
+  if (file.size > AVATAR_MAX_BYTES) {
+    throw new BadRequestException(
+      `"${file.originalname}" is too large (${megabytes(file.size)}MB). ` +
+        `Max allowed for an avatar is ${(AVATAR_MAX_BYTES / 1024).toFixed(0)}KB.`,
+    );
+  }
+}
+
 /**
  * FR-P2-ATT-05: server-side MIME allow-list + max file size, run
  * unconditionally on every upload regardless of what the client already

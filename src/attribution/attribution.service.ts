@@ -1,6 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import * as geoip from 'geoip-lite';
+import * as path from 'path';
+import { open, Reader, CityResponse } from 'maxmind';
 import { UAParser } from 'ua-parser-js';
 
 import { isPrivateOrLoopbackIp } from './extract-client-ip.util';
@@ -45,26 +46,56 @@ export interface BuildAttributionInput {
  * User-Agent, IP) into everything the Visitor Info panel needs.
  *
  * GeoIP choice (SRS §2.5 — "IP-based geolocation service/library available,
- * e.g. MaxMind GeoIP or similar"): **`geoip-lite`**, a pure-npm package that
- * bundles its own offline MaxMind-derived (GeoLite2-equivalent) city/country
- * database — no API key, no per-request network call, no native bindings to
- * compile. Chosen for the same reason Session 2 picked `bcryptjs` over
- * native `bcrypt`: this stack explicitly avoids Docker/native-build
- * complexity (see PROGRESS.md Session 0), and a paid/rate-limited HTTP geo
- * API (ip-api.com, ipapi.co, etc.) would add an external network dependency
- * and a new failure mode to something that runs on every widget load. The
- * trade-off: `geoip-lite`'s bundled DB is coarser than a live MaxMind
- * GeoLite2/GeoIP2 subscription (city-level accuracy is best-effort, and it
- * returns nothing for private/loopback IPs — see note in `resolveLocation`)
- * — acceptable for Phase 1's "approximate city/region/country" requirement
- * (FR-VIS-03 says "approximate" explicitly). Swappable later for a real
- * MaxMind GeoIP2 subscription without touching any caller of this service.
+ * e.g. MaxMind GeoIP or similar"): a 4-tier cascade (see `ip_geo_plan.md`),
+ * tried in order until one returns a result — `resolveLocation` below:
+ *
+ *   1. ipgeolocation.io — live API, 30k req/month free, needs
+ *      `IPGEOLOCATION_API_KEY`.
+ *   2. ipapi.co         — live API, 30k req/month free, no key needed.
+ *   3. ip-api.com       — live API, 45 req/min free, no key, HTTP only
+ *      (fine server-side — no browser mixed-content restriction applies).
+ *   4. Self-hosted MaxMind GeoLite2-City `.mmdb`
+ *      (`geo-data/GeoLite2-City.mmdb`, read via the `maxmind` npm package)
+ *      — always available, no network call, no rate limit. Final fallback
+ *      for when every online tier is down/rate-limited/misconfigured.
+ *
+ * Tiers 1–3 are live lookups, so they're always current by construction —
+ * no staleness concern. Tier 4 replaced the `geoip-lite` npm package
+ * (formerly the *primary* source here): `geoip-lite` bundles its own
+ * offline DB snapshot frozen at `npm install` time with no supported way to
+ * refresh without republishing the whole package — it silently drifted
+ * stale enough to misattribute a real US IP to Poland. The self-hosted
+ * `.mmdb` file is instead fetched/refreshed independently via
+ * `npm run geoip:update` (`src/database/update-geoip-db.ts`), scheduled to
+ * run periodically (weekly — MaxMind republishes GeoLite2 about that
+ * often), so it stays current even as the last-resort tier. If the file is
+ * missing (e.g. the script has never been run) or every tier fails,
+ * `location` is just `{}` — this never blocks visitor-session creation.
+ *
+ * Each online tier gets a short timeout (`GEO_LOOKUP_TIMEOUT_MS`, default
+ * 2s) and any failure — timeout, network error, non-2xx, quota/429,
+ * malformed body — falls through to the next tier immediately.
  */
 @Injectable()
-export class AttributionService {
+export class AttributionService implements OnModuleInit {
   private readonly logger = new Logger(AttributionService.name);
+  private maxmindReader: Reader<CityResponse> | null = null;
 
   constructor(private readonly configService: ConfigService) {}
+
+  async onModuleInit(): Promise<void> {
+    const mmdbPath = path.join(process.cwd(), 'geo-data', 'GeoLite2-City.mmdb');
+    try {
+      this.maxmindReader = await open<CityResponse>(mmdbPath);
+      this.logger.log(`Loaded MaxMind GeoLite2-City DB from ${mmdbPath}`);
+    } catch (err) {
+      this.logger.warn(
+        `MaxMind local DB unavailable at ${mmdbPath} (${(err as Error).message}). ` +
+          `Run "npm run geoip:update" to fetch it. Falling back to the online ` +
+          `geolocation lookup for every real IP until then.`,
+      );
+    }
+  }
 
   async build(
     input: BuildAttributionInput,
@@ -168,108 +199,207 @@ export class AttributionService {
   }
 
   /**
-   * `geoip-lite` returns `null` for private/loopback/unroutable IPs (e.g.
-   * every localhost dev request) — that's expected, not a bug; there's no
-   * geo-location for an RFC1918 address, and `isPrivateOrLoopbackIp` skips
-   * the online fallback below entirely for those (a lookup for "the same
-   * machine" would be pointless/misleading). For a real, routable IP that
-   * `geoip-lite`'s bundled offline DB happens to miss (its DB is coarse —
-   * can lag behind newly-allocated ranges), this session added a
-   * best-effort online fallback (`app.attribution.geoFallbackEnabled`,
-   * default on) — one free, no-API-key HTTP lookup, short timeout, and the
-   * exact same "never throw, just return {}" behavior on any failure so a
-   * slow/unreachable network never blocks visitor-session creation. To see
-   * real location data on a local dev machine without relying on the
-   * fallback, pass a public IP (e.g. via `X-Forwarded-For` when testing
-   * with curl).
+   * `isPrivateOrLoopbackIp` short-circuits the whole cascade — there's no
+   * real-world geo-location for an RFC1918/loopback/link-local address (a
+   * lookup for "the same machine"/"the local network" would be pointless/
+   * misleading), so none of the 4 tiers below are worth trying for one. For
+   * a real, routable IP, tries each tier in order (see the class doc
+   * comment) until one returns a result; any tier failing — timeout,
+   * network error, quota, malformed body — falls through to the next. If
+   * every tier fails (or `app.attribution.geoFallbackEnabled` is `false`,
+   * which skips tiers 1–3 entirely), returns `{}` — this never throws and
+   * never blocks visitor-session creation. To see real location data on a
+   * local dev machine, pass a public IP (e.g. via `X-Forwarded-For` when
+   * testing with curl) — private/loopback IPs always short-circuit above.
    */
   private async resolveLocation(ip: string | null): Promise<{
     city?: string;
     region?: string;
     country?: string;
   }> {
-    if (!ip) {
+    if (!ip || isPrivateOrLoopbackIp(ip)) {
       return {};
-    }
-    try {
-      const result = geoip.lookup(ip);
-      if (result) {
-        return {
-          city: result.city || undefined,
-          region: result.region || undefined,
-          country: result.country || undefined,
-        };
-      }
-    } catch (err) {
-      this.logger.warn(
-        `geoip-lite lookup failed for ${ip}: ${(err as Error).message}`,
-      );
     }
 
-    if (isPrivateOrLoopbackIp(ip)) {
-      return {};
-    }
     if (
-      this.configService.get<boolean>('app.attribution.geoFallbackEnabled') ===
+      this.configService.get<boolean>('app.attribution.geoFallbackEnabled') !==
       false
     ) {
-      return {};
+      const online =
+        (await this.resolveViaIpGeolocationIo(ip)) ??
+        (await this.resolveViaIpApiCo(ip)) ??
+        (await this.resolveViaIpApiCom(ip));
+      if (online) {
+        return online;
+      }
     }
-    return this.resolveLocationOnline(ip);
+
+    return this.resolveViaMaxmindLocal(ip);
+  }
+
+  private geoLookupTimeoutMs(): number {
+    return (
+      this.configService.get<number>('app.attribution.geoLookupTimeoutMs') ??
+      2000
+    );
   }
 
   /**
-   * Free, no-API-key fallback (ip-api.com's JSON endpoint) for a real IP
-   * `geoip-lite` couldn't resolve. 2s timeout via `AbortController`; any
-   * failure (timeout, network error, non-2xx, malformed body) is swallowed
-   * and returns `{}` — same contract as the offline lookup above.
-   *
-   * Country-code fix (visitor-table country-flag icon work): this used to
-   * request ip-api.com's `country` field (a full name like "United
-   * States") and store it straight into `location.country` — but
-   * `geoip-lite`'s own lookup above (the primary, non-fallback path) writes
-   * an ISO 3166-1 alpha-2 code into that same field (e.g. "US"), and so does
-   * every seeded test fixture (`seed-test.ts`'s `geo` pool: `'US'`, `'GB'`,
-   * `'CA'`, `'AU'`). A Visitor resolved via this fallback therefore used to
-   * carry a differently-shaped `location.country` than everyone else — no
-   * visible bug before now since it was only ever rendered as plain text,
-   * but the new country-flag icon (`CountryFlag`, `chat-hub-web`) keys its
-   * `flag-icons` CSS class directly off this field and needs it to always
-   * be the 2-letter code. Requesting `countryCode` instead keeps this path
-   * consistent with the other two.
+   * Tier 1 — ipgeolocation.io. Free tier: 30,000 req/month, needs
+   * `IPGEOLOCATION_API_KEY`. Returns `undefined` (not `{}`) on any
+   * failure/missing key so the caller's `??` chain correctly falls through
+   * to the next tier instead of treating "no data" as "confirmed empty
+   * location" — same convention for every tier below.
    */
-  private async resolveLocationOnline(ip: string): Promise<{
-    city?: string;
-    region?: string;
-    country?: string;
-  }> {
+  private async resolveViaIpGeolocationIo(
+    ip: string,
+  ): Promise<{ city?: string; region?: string; country?: string } | undefined> {
+    const apiKey = this.configService.get<string>(
+      'app.attribution.ipgeolocationIoApiKey',
+    );
+    if (!apiKey) {
+      return undefined;
+    }
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
+    const timeout = setTimeout(() => controller.abort(), this.geoLookupTimeoutMs());
+    try {
+      const res = await fetch(
+        `https://api.ipgeolocation.io/v2/ipgeo?apiKey=${encodeURIComponent(apiKey)}&ip=${encodeURIComponent(ip)}&fields=location`,
+        { signal: controller.signal },
+      );
+      if (!res.ok) return undefined;
+      const body = (await res.json()) as {
+        location?: {
+          city?: string;
+          state_prov?: string;
+          country_code2?: string;
+        };
+      };
+      const country = body.location?.country_code2;
+      if (!country) return undefined;
+      return {
+        city: body.location?.city || undefined,
+        region: body.location?.state_prov || undefined,
+        country,
+      };
+    } catch (err) {
+      this.logger.warn(
+        `ipgeolocation.io lookup failed for ${ip}: ${(err as Error).message}`,
+      );
+      return undefined;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  /** Tier 2 — ipapi.co. Free tier: 30,000 req/month, no API key needed. */
+  private async resolveViaIpApiCo(
+    ip: string,
+  ): Promise<{ city?: string; region?: string; country?: string } | undefined> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.geoLookupTimeoutMs());
+    try {
+      const res = await fetch(`https://ipapi.co/${encodeURIComponent(ip)}/json/`, {
+        signal: controller.signal,
+      });
+      if (!res.ok) return undefined;
+      const body = (await res.json()) as {
+        error?: boolean;
+        city?: string;
+        region_code?: string;
+        country_code?: string;
+      };
+      if (body.error || !body.country_code) return undefined;
+      return {
+        city: body.city || undefined,
+        region: body.region_code || undefined,
+        country: body.country_code,
+      };
+    } catch (err) {
+      this.logger.warn(
+        `ipapi.co lookup failed for ${ip}: ${(err as Error).message}`,
+      );
+      return undefined;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  /**
+   * Tier 3 — ip-api.com. Free tier: 45 req/min (~1.9M/month), no API key.
+   * HTTP-only on the free tier, which is fine here — this call happens
+   * server-side (Node → ip-api.com), so the browser mixed-content
+   * restriction that would block an HTTPS *page* from calling an HTTP
+   * endpoint directly never applies.
+   *
+   * Country-code note (visitor-table country-flag icon work, carried over
+   * from when this was the only online tier): requests `countryCode`
+   * specifically (not the full-name `country` field) so this stays
+   * consistent with every other tier and with the seeded test fixtures
+   * (`seed-test.ts`'s `geo` pool) — `location.country` must always be an
+   * ISO 3166-1 alpha-2 code, since `CountryFlag` (chat-hub-web) keys its
+   * `flag-icons` CSS class directly off it.
+   */
+  private async resolveViaIpApiCom(
+    ip: string,
+  ): Promise<{ city?: string; region?: string; country?: string } | undefined> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.geoLookupTimeoutMs());
     try {
       const res = await fetch(
         `http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,city,regionName,countryCode`,
         { signal: controller.signal },
       );
-      if (!res.ok) return {};
+      if (!res.ok) return undefined;
       const body = (await res.json()) as {
         status?: string;
         city?: string;
         regionName?: string;
         countryCode?: string;
       };
-      if (body.status !== 'success') return {};
+      if (body.status !== 'success' || !body.countryCode) return undefined;
       return {
         city: body.city || undefined,
         region: body.regionName || undefined,
-        country: body.countryCode || undefined,
+        country: body.countryCode,
       };
     } catch (err) {
       this.logger.warn(
-        `Online geolocation fallback failed for ${ip}: ${(err as Error).message}`,
+        `ip-api.com lookup failed for ${ip}: ${(err as Error).message}`,
       );
-      return {};
+      return undefined;
     } finally {
       clearTimeout(timeout);
+    }
+  }
+
+  /**
+   * Tier 4 (final fallback) — the self-hosted MaxMind GeoLite2-City
+   * `.mmdb`, loaded once in `onModuleInit`. No network call, no rate
+   * limit — always tried when every online tier above failed or was
+   * skipped (`geoFallbackEnabled: false`).
+   */
+  private resolveViaMaxmindLocal(ip: string): {
+    city?: string;
+    region?: string;
+    country?: string;
+  } {
+    if (!this.maxmindReader) {
+      return {};
+    }
+    try {
+      const result = this.maxmindReader.get(ip);
+      if (!result) return {};
+      return {
+        city: result.city?.names?.en || undefined,
+        region: result.subdivisions?.[0]?.iso_code || undefined,
+        country: result.country?.iso_code || undefined,
+      };
+    } catch (err) {
+      this.logger.warn(
+        `MaxMind local lookup failed for ${ip}: ${(err as Error).message}`,
+      );
+      return {};
     }
   }
 

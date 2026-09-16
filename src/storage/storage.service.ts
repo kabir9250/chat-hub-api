@@ -108,8 +108,20 @@ export class StorageService {
    * separate DB lookup and no way to tamper with either without
    * invalidating the signature.
    */
-  getSignedUrl({ key, fileName, fileType }: SignParams): string {
-    const exp = Math.floor(Date.now() / 1000) + this.ttlSeconds;
+  /**
+   * `ttlSecondsOverride` (Personal Settings → Profile avatar upload, this
+   * session) — a User's own avatar is displayed persistently (top bar,
+   * account menu) rather than minted fresh on every message read the way a
+   * chat attachment is, so `User.avatarUrl` needs a link that stays valid
+   * far longer than the default 5-minute chat-attachment TTL — otherwise it
+   * would silently 403 a few minutes after upload. Omitted (every existing
+   * caller) keeps the configured default unchanged.
+   */
+  getSignedUrl(
+    { key, fileName, fileType }: SignParams,
+    ttlSecondsOverride?: number,
+  ): string {
+    const exp = Math.floor(Date.now() / 1000) + (ttlSecondsOverride ?? this.ttlSeconds);
     const sig = this.sign(key, fileName, fileType, exp);
     const qs = new URLSearchParams({
       key,

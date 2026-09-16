@@ -10,6 +10,7 @@ import {
   IsOptional,
   IsString,
   IsUrl,
+  Matches,
   MaxLength,
   ValidateNested,
 } from 'class-validator';
@@ -222,4 +223,29 @@ export class UpdateWidgetConfigDto {
   @ValidateNested({ each: true })
   @Type(() => UpdateFormFieldDto)
   offlineFormFields?: UpdateFormFieldDto[];
+
+  @ApiPropertyOptional({
+    example: false,
+    description:
+      '"Web Widget security" tab — Blocked countries whole-feature on/off switch.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  blockedCountriesEnabled?: boolean;
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['PK', 'IN'],
+    description:
+      'ISO 3166-1 alpha-2 country codes chat is blocked from, while blockedCountriesEnabled is true.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(250)
+  @IsString({ each: true })
+  @Matches(/^[A-Za-z]{2}$/, {
+    each: true,
+    message: 'Each blocked country must be a 2-letter ISO 3166-1 alpha-2 code.',
+  })
+  blockedCountries?: string[];
 }

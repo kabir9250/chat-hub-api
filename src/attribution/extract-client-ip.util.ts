@@ -41,9 +41,10 @@ function resolveForwardedIp(
  * front of local dev), so this header is read directly rather than relying
  * on `req.ip` to already reflect it.
  *
- * Also doubles as this session's dev-testing hook: `geoip-lite` returns no
- * location for private/loopback IPs (every local request), so pass e.g.
- * `curl -H "X-Forwarded-For: 8.8.8.8"` to see real location data locally.
+ * Also doubles as this session's dev-testing hook: the self-hosted MaxMind
+ * DB returns no location for private/loopback IPs (every local request), so
+ * pass e.g. `curl -H "X-Forwarded-For: 8.8.8.8"` to see real location data
+ * locally.
  *
  * Falls back to `X-Real-IP` (nginx's own convention, used by some
  * reverse-proxy/hosting setups that don't set X-Forwarded-For) before the

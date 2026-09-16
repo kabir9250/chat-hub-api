@@ -27,6 +27,7 @@ import { AnalyticsModule } from './analytics/analytics.module';
 import { StorageModule } from './storage/storage.module';
 import { AttachmentsModule } from './attachments/attachments.module';
 import { ShortcutsModule } from './shortcuts/shortcuts.module';
+import { TicketsModule } from './tickets/tickets.module';
 
 @Module({
   imports: [
@@ -66,6 +67,7 @@ import { ShortcutsModule } from './shortcuts/shortcuts.module';
     WidgetBootstrapModule,
     VisitorsModule,
     LeadsModule,
+    TicketsModule,
     ConversationsModule,
     // PageVisitsModule (this session) is a leaf provider module with no
     // controller — like PresenceModule/RealtimeEventsModule, it's imported

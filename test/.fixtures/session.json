@@ -1,0 +1,51 @@
+{
+  "generatedAt": "2026-09-14T13:24:18.608Z",
+  "users": {
+    "owner@test.local": {
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2YWE3ZjRmNTQ5YTUzN2RjMTBkN2UwM2EiLCJlbWFpbCI6Im93bmVyQHRlc3QubG9jYWwiLCJ0eXBlIjoidXNlciIsImlhdCI6MTc4OTM5MjI1MywiZXhwIjoxNzg5NDc4NjUzfQ._x4EPFcTCx4YJ7qAr8aMcPPKrCclqFnRp2b_h_NlQhI",
+      "userId": "6aa7f4f549a537dc10d7e03a",
+      "organizationId": "6aa7f4f149a537dc10d7e00b"
+    },
+    "manager@test.local": {
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2YWE3ZjRmNTQ5YTUzN2RjMTBkN2UwM2QiLCJlbWFpbCI6Im1hbmFnZXJAdGVzdC5sb2NhbCIsInR5cGUiOiJ1c2VyIiwiaWF0IjoxNzg5MzkyMjU0LCJleHAiOjE3ODk0Nzg2NTR9.5V6boyB33eQTe1c85glGj7eiftxKQCpZNfwAYexvX30",
+      "userId": "6aa7f4f549a537dc10d7e03d",
+      "organizationId": "6aa7f4f149a537dc10d7e00b"
+    },
+    "supervisor-a@test.local": {
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2YWE3ZjRmNTQ5YTUzN2RjMTBkN2UwNDAiLCJlbWFpbCI6InN1cGVydmlzb3ItYUB0ZXN0LmxvY2FsIiwidHlwZSI6InVzZXIiLCJpYXQiOjE3ODkzOTIyNTUsImV4cCI6MTc4OTQ3ODY1NX0.NxGKM_Obs7ALGD_YAVxrmKIqqCevFuzGLerhnkCH-AY",
+      "userId": "6aa7f4f549a537dc10d7e040",
+      "organizationId": "6aa7f4f149a537dc10d7e00b"
+    },
+    "supervisor-b@test.local": {
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2YWE3ZjRmNTQ5YTUzN2RjMTBkN2UwNDMiLCJlbWFpbCI6InN1cGVydmlzb3ItYkB0ZXN0LmxvY2FsIiwidHlwZSI6InVzZXIiLCJpYXQiOjE3ODkzOTIyNTUsImV4cCI6MTc4OTQ3ODY1NX0.sU29tZjczfLQT_CSuiRY0YHDFBVu2NcG4VlDdfkmPgk",
+      "userId": "6aa7f4f549a537dc10d7e043",
+      "organizationId": "6aa7f4f149a537dc10d7e00b"
+    },
+    "agent-a1@test.local": {
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2YWE3ZjRmNTQ5YTUzN2RjMTBkN2UwNDYiLCJlbWFpbCI6ImFnZW50LWExQHRlc3QubG9jYWwiLCJ0eXBlIjoidXNlciIsImlhdCI6MTc4OTM5MjI1NiwiZXhwIjoxNzg5NDc4NjU2fQ.dFVXx7MjI4TEWUlr0t4Qnz3aKvWEWHu-F6YXQghTH58",
+      "userId": "6aa7f4f549a537dc10d7e046",
+      "organizationId": "6aa7f4f149a537dc10d7e00b"
+    },
+    "agent-a2@test.local": {
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2YWE3ZjRmNTQ5YTUzN2RjMTBkN2UwNDkiLCJlbWFpbCI6ImFnZW50LWEyQHRlc3QubG9jYWwiLCJ0eXBlIjoidXNlciIsImlhdCI6MTc4OTM5MjI1NiwiZXhwIjoxNzg5NDc4NjU2fQ.ZjY0gQD8IeOC6C0hPPQVMK5xPXhOtS5mi1TwKZRAVg0",
+      "userId": "6aa7f4f549a537dc10d7e049",
+      "organizationId": "6aa7f4f149a537dc10d7e00b"
+    },
+    "agent-b1@test.local": {
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2YWE3ZjRmNTQ5YTUzN2RjMTBkN2UwNGMiLCJlbWFpbCI6ImFnZW50LWIxQHRlc3QubG9jYWwiLCJ0eXBlIjoidXNlciIsImlhdCI6MTc4OTM5MjI1NywiZXhwIjoxNzg5NDc4NjU3fQ.MmDuaMSmbjUeHDis3Vmctg0Vfo5L97TL3y1DnoE-eWA",
+      "userId": "6aa7f4f549a537dc10d7e04c",
+      "organizationId": "6aa7f4f149a537dc10d7e00b"
+    },
+    "agent-multi@test.local": {
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2YWE3ZjRmNTQ5YTUzN2RjMTBkN2UwNGYiLCJlbWFpbCI6ImFnZW50LW11bHRpQHRlc3QubG9jYWwiLCJ0eXBlIjoidXNlciIsImlhdCI6MTc4OTM5MjI1NywiZXhwIjoxNzg5NDc4NjU3fQ.rjABsq9K7gqs_Xc2dN0cyP6UyDoAQMapjlxFGZYYouE",
+      "userId": "6aa7f4f549a537dc10d7e04f",
+      "organizationId": "6aa7f4f149a537dc10d7e00b"
+    }
+  },
+  "sitesByName": {
+    "Site A": "6aa7f4f149a537dc10d7e014",
+    "Site B": "6aa7f4f249a537dc10d7e022",
+    "Site C": "6aa7f4f449a537dc10d7e029",
+    "Site D": "6aa7f4f449a537dc10d7e02f"
+  }
+}

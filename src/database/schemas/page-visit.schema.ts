@@ -52,6 +52,16 @@ export class PageVisit {
   @Prop({ type: String, default: null })
   pageCategory!: string | null;
 
+  // Visitors "Group by Page title" (this session) — the host page's
+  // `document.title` at the moment this row was entered, forwarded by
+  // `public/embed.js` (the widget iframe can't read it directly — separate
+  // document, by design, same reasoning as `pageUrl`/`referrer` above).
+  // Nullable/best-effort: absent on a caller/widget build that predates this
+  // field (an older cached embed.js bundle sends none), or a non-browser
+  // caller.
+  @Prop({ type: String, default: null })
+  pageTitle!: string | null;
+
   @Prop({ type: Date, required: true, default: () => new Date() })
   enteredAt!: Date;
 

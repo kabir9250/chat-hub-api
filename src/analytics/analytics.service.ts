@@ -77,6 +77,8 @@ export interface ResponseResolutionStats {
   medianFirstResponseSeconds: number | null;
   avgResolutionSeconds: number | null;
   medianResolutionSeconds: number | null;
+  avgRating: number | null;
+  ratingCount: number;
 }
 
 export interface AgentResponseResolutionStats extends ResponseResolutionStats {
@@ -162,6 +164,7 @@ function statsOf(
   rows: {
     firstResponseSeconds: number | null;
     resolutionSeconds: number | null;
+    ratingScore: number | null;
   }[],
 ): ResponseResolutionStats {
   const firstResponses = rows
@@ -170,12 +173,17 @@ function statsOf(
   const resolutions = rows
     .map((r) => r.resolutionSeconds)
     .filter((v): v is number => v !== null);
+  const ratings = rows
+    .map((r) => r.ratingScore)
+    .filter((v): v is number => v !== null);
   return {
     conversationCount: rows.length,
     avgFirstResponseSeconds: average(firstResponses),
     medianFirstResponseSeconds: median(firstResponses),
     avgResolutionSeconds: average(resolutions),
     medianResolutionSeconds: median(resolutions),
+    avgRating: average(ratings),
+    ratingCount: ratings.length,
   };
 }
 
@@ -474,6 +482,7 @@ export class AnalyticsService {
       siteId: Types.ObjectId;
       firstResponseSeconds: number | null;
       resolutionSeconds: number | null;
+      ratingScore: number | null;
     }[]
   > {
     const match: FilterQuery<ConversationDocument> = {
@@ -488,6 +497,7 @@ export class AnalyticsService {
         assignedAgentId: Types.ObjectId | null;
         startedAt: Date;
         closedAt: Date | null;
+        ratingScore: number | null;
         firstAgentMessageAt: Date | null;
       }>([
         { $match: match },
@@ -519,6 +529,7 @@ export class AnalyticsService {
             assignedAgentId: 1,
             startedAt: 1,
             closedAt: 1,
+            ratingScore: 1,
             firstAgentMessageAt: {
               $arrayElemAt: ['$firstAgentMessage.sentAt', 0],
             },
@@ -536,6 +547,7 @@ export class AnalyticsService {
       resolutionSeconds: r.closedAt
         ? (r.closedAt.getTime() - r.startedAt.getTime()) / 1000
         : null,
+      ratingScore: r.ratingScore ?? null,
     }));
   }
 
@@ -544,6 +556,7 @@ export class AnalyticsService {
       agentId: string | null;
       firstResponseSeconds: number | null;
       resolutionSeconds: number | null;
+      ratingScore: number | null;
     }[],
   ): Promise<AgentResponseResolutionStats[]> {
     const byAgent = new Map<string, typeof rows>();

@@ -27,6 +27,7 @@ export const PERMISSION_MODULES = [
   'Leads',
   'Analytics',
   'Shortcuts',
+  'Tickets',
 ] as const;
 
 export type PermissionModule = (typeof PERMISSION_MODULES)[number];
@@ -227,8 +228,22 @@ export const PERMISSION_CATALOG: readonly PermissionDefinition[] = [
       'Read-only oversight: view every Shortcut that exists in the ' +
       "Organization, including every individual's Personal ones, with the " +
       "creator's identity shown. Does not grant edit/delete rights over a " +
-      'Shortcut the viewer didn\'t create and doesn\'t otherwise hold ' +
+      "Shortcut the viewer didn't create and doesn't otherwise hold " +
       'manage_site/manage_organization over. Default: Owner only.',
+  },
+  // Phase 3 (Tickets screen, replaces the scrapped Lead Creation Settings)
+  // — Organization-wide (no Site involved), same { siteSource: 'none' }
+  // pattern as roles.manage/shortcuts.view_all. Owner-only by default (via
+  // ALL_PERMISSION_KEYS below) — deliberately NOT added to Manager/
+  // Supervisor/Agent's DEFAULT_ROLE_PERMISSIONS, same precedent
+  // shortcuts.view_all set.
+  {
+    key: 'tickets.view',
+    module: 'Tickets',
+    description:
+      'View the Tickets screen — every online (live-chat) and offline ' +
+      '(Offline Contact Form) Conversation, with transcript, across the ' +
+      'Organization',
   },
 ] as const;
 

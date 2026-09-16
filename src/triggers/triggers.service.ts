@@ -24,7 +24,52 @@ const GTE_CONDITION_TYPES = [
   'pageViews',
   'pastVisits',
   'pastChats',
+  'stillOnSite',
 ];
+
+const EQUALS_ONLY_CONDITION_TYPES = [
+  'utmSource',
+  'deviceType',
+  'onlineStatus',
+  'hourOfDay',
+  'dayOfWeek',
+  'visitorIp',
+  'visitorCity',
+  'visitorRegion',
+  'visitorCountryCode',
+  'visitorCountryName',
+  'visitorDepartment',
+  'visitorTag',
+  'browser',
+  'platform',
+  'searchEngine',
+  'accountStatus',
+];
+
+// True/false conditions — operator is always 'equals', value must be the
+// literal string 'true'/'false' (TriggerEvaluationService reads it that way).
+const TRUE_FALSE_CONDITION_TYPES = [
+  'visitorTriggered',
+  'visitorIsChatting',
+  'visitorRequestingChat',
+  'visitorServed',
+];
+
+// Free-text conditions accepting either 'equals' or 'contains'.
+const EQUALS_OR_CONTAINS_CONDITION_TYPES = [
+  'pageTitle',
+  'visitorName',
+  'visitorEmail',
+];
+
+// 'contains'-only free-text conditions.
+const CONTAINS_ONLY_CONDITION_TYPES = [
+  'visitorHostName',
+  'userAgent',
+  'searchTerms',
+];
+
+const DAY_OF_WEEK_VALUES = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
 /**
  * TriggersService — FR-CFG-04/05. `PermissionGuard` (via
@@ -220,13 +265,14 @@ export class TriggersService {
     for (const condition of conditions) {
       switch (condition.type) {
         case 'url':
+        case 'previousPage':
           if (
             !(TRIGGER_URL_OPERATORS as readonly string[]).includes(
               condition.operator,
             )
           ) {
             throw new BadRequestException(
-              `A "url" condition's operator must be one of: ${TRIGGER_URL_OPERATORS.join(', ')}.`,
+              `A "${condition.type}" condition's operator must be one of: ${TRIGGER_URL_OPERATORS.join(', ')}.`,
             );
           }
           break;
@@ -237,17 +283,66 @@ export class TriggersService {
             );
           }
           break;
-        case 'utmSource':
-        case 'deviceType':
-        case 'onlineStatus':
+        case 'hourOfDay':
           if (condition.operator !== 'equals') {
             throw new BadRequestException(
-              `A "${condition.type}" condition's operator must be "equals".`,
+              'An "hourOfDay" condition\'s operator must be "equals".',
+            );
+          }
+          if (!/^([0-9]|1[0-9]|2[0-3])$/.test(condition.value)) {
+            throw new BadRequestException(
+              'An "hourOfDay" condition\'s value must be an integer 0-23.',
+            );
+          }
+          break;
+        case 'dayOfWeek':
+          if (condition.operator !== 'equals') {
+            throw new BadRequestException(
+              'A "dayOfWeek" condition\'s operator must be "equals".',
+            );
+          }
+          if (!DAY_OF_WEEK_VALUES.includes(condition.value)) {
+            throw new BadRequestException(
+              `A "dayOfWeek" condition's value must be one of: ${DAY_OF_WEEK_VALUES.join(', ')}.`,
             );
           }
           break;
         default:
-          if (GTE_CONDITION_TYPES.includes(condition.type)) {
+          if (EQUALS_ONLY_CONDITION_TYPES.includes(condition.type)) {
+            if (condition.operator !== 'equals') {
+              throw new BadRequestException(
+                `A "${condition.type}" condition's operator must be "equals".`,
+              );
+            }
+          } else if (TRUE_FALSE_CONDITION_TYPES.includes(condition.type)) {
+            if (condition.operator !== 'equals') {
+              throw new BadRequestException(
+                `A "${condition.type}" condition's operator must be "equals".`,
+              );
+            }
+            if (condition.value !== 'true' && condition.value !== 'false') {
+              throw new BadRequestException(
+                `A "${condition.type}" condition's value must be "true" or "false".`,
+              );
+            }
+          } else if (
+            EQUALS_OR_CONTAINS_CONDITION_TYPES.includes(condition.type)
+          ) {
+            if (
+              condition.operator !== 'equals' &&
+              condition.operator !== 'contains'
+            ) {
+              throw new BadRequestException(
+                `A "${condition.type}" condition's operator must be "equals" or "contains".`,
+              );
+            }
+          } else if (CONTAINS_ONLY_CONDITION_TYPES.includes(condition.type)) {
+            if (condition.operator !== 'contains') {
+              throw new BadRequestException(
+                `A "${condition.type}" condition's operator must be "contains".`,
+              );
+            }
+          } else if (GTE_CONDITION_TYPES.includes(condition.type)) {
             if (condition.operator !== 'gte') {
               throw new BadRequestException(
                 `A "${condition.type}" condition's operator must be "gte".`,
@@ -264,7 +359,14 @@ export class TriggersService {
   }
 
   private normalizeActions(actions: ActionDto[]) {
-    return actions.map((a) => ({ type: a.type, value: a.value ?? null }));
+    return actions.map((a) => ({
+      type: a.type,
+      value: a.value ?? null,
+      // Session Feature-2c-complex-actions — only showProactiveMessage uses
+      // this, but it's carried through unconditionally (like `value` above)
+      // rather than conditionally dropped, same "store what was sent" idiom.
+      fromName: a.fromName ?? null,
+    }));
   }
 
   private assertValidActions(actions: ActionDto[]): void {
@@ -274,10 +376,31 @@ export class TriggersService {
         'sendConciergeMessage',
         'setDepartment',
         'addTag',
+        // Session Feature-2c-simple-actions — all 4 are direct field
+        // writes that make no sense with an empty value (an empty
+        // "replace note" would just be a silent clear, which an admin
+        // should express by leaving the action off, not by submitting one).
+        'setVisitorName',
+        'removeTag',
+        'replaceNote',
+        'appendNote',
+        // Session Feature-2c-complex-actions
+        'wait', // seconds to delay
+        'setVisitorDepartment', // departmentId
       ].includes(action.type);
       if (needsValue && !action.value?.trim()) {
         throw new BadRequestException(
           `A "${action.type}" action requires a value.`,
+        );
+      }
+      // `setTriggered`/`blockVisitor` deliberately have NO needsValue check
+      // — `setTriggered` never takes one at all (see trigger.schema.ts),
+      // and `blockVisitor`'s value is an OPTIONAL ban reason (empty is a
+      // valid "no reason given" ban, same as VisitorsService.ban()'s own
+      // `reason?` param).
+      if (action.type === 'wait' && !/^[1-9][0-9]*$/.test(action.value ?? '')) {
+        throw new BadRequestException(
+          'A "wait" action\'s value must be a positive whole number of seconds.',
         );
       }
     }

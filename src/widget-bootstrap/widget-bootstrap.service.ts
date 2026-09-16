@@ -21,6 +21,7 @@ import {
 } from '../database/schemas';
 import { PermissionsService } from '../rbac/permissions.service';
 import { PresenceService } from '../realtime/presence.service';
+import { isWithinBusinessHours } from '../sites/business-hours.util';
 
 /** Public, visitor-safe shape of a form field — no server-only bookkeeping. */
 export type PublicFormField = FormFieldConfig;
@@ -172,9 +173,7 @@ export class WidgetBootstrapService {
       throw new NotFoundException('Chat is not enabled for this Site.');
     }
 
-    const withinBusinessHours = this.isWithinBusinessHours(
-      site.businessHoursConfig,
-    );
+    const withinBusinessHours = isWithinBusinessHours(site.businessHoursConfig);
 
     const enabledUsers = await this.userModel
       .find({ enabled: true })

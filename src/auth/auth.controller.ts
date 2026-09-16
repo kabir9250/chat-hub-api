@@ -90,8 +90,8 @@ export class AuthController {
   @Get('me')
   @UseGuards(JwtAuthGuard)
   async me(@CurrentUser() user: AuthenticatedUser) {
-    const { organizationPermissions, sitePermissions, siteNames } =
+    const { organizationPermissions, sitePermissions, siteNames, siteDomains } =
       await this.permissionsService.getEffectivePermissionsSummary(user.userId);
-    return { ...user, organizationPermissions, sitePermissions, siteNames };
+    return { ...user, organizationPermissions, sitePermissions, siteNames, siteDomains };
   }
 }

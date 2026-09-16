@@ -58,10 +58,14 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       fullName: user.fullName,
       enabled: user.enabled,
       status: user.status,
-      notificationPreferences: {
-        desktopEnabled: user.notificationPreferences.desktopEnabled,
-        soundEnabled: user.notificationPreferences.soundEnabled,
-      },
+      notificationPreferences: user.notificationPreferences,
+      tagline: user.tagline,
+      avatarUrl: user.avatarUrl,
+      preferredLanguage: user.preferredLanguage,
+      chatLimit: user.chatLimit,
+      skills: user.skills,
+      keyboardShortcutsEnabled: user.keyboardShortcutsEnabled,
+      idleTimeoutSettings: user.idleTimeoutSettings,
     };
   }
 }

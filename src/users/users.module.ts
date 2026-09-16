@@ -13,6 +13,7 @@ import {
 } from '../database/schemas';
 import { AuditLogModule } from '../audit-log/audit-log.module';
 import { RbacModule } from '../rbac/rbac.module';
+import { StorageModule } from '../storage/storage.module';
 import { UsersController } from './users.controller';
 import { MeController } from './me.controller';
 import { UsersService } from './users.service';
@@ -31,6 +32,12 @@ import { UsersService } from './users.service';
     // see its own doc comment), but RbacModule is still needed here for
     // UsersController's existing routes in this same module.
     RbacModule,
+    // Personal Settings → Profile avatar upload — reuses StorageService,
+    // the same class the chat-attachment upload path (AttachmentsModule)
+    // uses (task requirement: no parallel upload path). See its own doc
+    // comment for why it's a dependency-free leaf module, safe to import
+    // here too.
+    StorageModule,
   ],
   controllers: [UsersController, MeController],
   providers: [UsersService],

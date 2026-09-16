@@ -131,6 +131,36 @@ export class Visitor {
   // `BusinessHoursConfig.weeklySchedule` already uses.
   @Prop({ type: Object, default: {} })
   customFields!: Record<string, string>;
+
+  // Feature 2.2 groundwork (`12-zendesk-feature-parity-srs.md` §2.2) — new
+  // fields the (not-yet-built) Trigger evaluation engine will read/write.
+  // No evaluation logic lives here; these are just the data slots the SRS's
+  // "Visitor tag"/"Visitor triggered"/"Visitor department" conditions and
+  // the "Add tag"/"Remove tag"/"Set triggered"/"Set visitor department"
+  // actions will need once that engine is built.
+
+  // "Visitor tag" condition / "Add tag"-"Remove tag" actions. Deliberately a
+  // SEPARATE pool from `Conversation.tags` (FR-AGT-11, Chat Tags Tab §3.2 —
+  // Zendesk's own docs confirm trigger/JS-API tags never appear in that
+  // predefined Conversation-tag list) — do not merge the two systems.
+  @Prop({ type: [String], default: [] })
+  tags!: string[];
+
+  // "Visitor triggered" condition, set by the (future) "Set triggered"
+  // action. Distinct from `fireOncePerVisitor`'s automatic per-Trigger dedupe
+  // (Trigger.fireOncePerVisitor) — this is a general-purpose flag any
+  // Trigger's conditions/actions can read/write deliberately.
+  @Prop({ required: true, default: false })
+  wasTriggered!: boolean;
+
+  // "Visitor department" condition, set by the (future) "Set visitor
+  // department" action — lets a Trigger assign a Department to a Visitor
+  // BEFORE FR-RTE-01 routing runs, so routing can respect a Trigger-assigned
+  // Department rather than only the Site's default. Nullable (no Trigger has
+  // set one) — never defaults to the Site's own default Department; that
+  // fallback stays purely a routing-time concern, not stored here.
+  @Prop({ type: SchemaTypes.ObjectId, ref: 'Department', default: null })
+  department!: Types.ObjectId | null;
 }
 
 export type VisitorDocument = Visitor & Document;

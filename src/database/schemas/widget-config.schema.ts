@@ -239,6 +239,23 @@ export class WidgetConfig {
   @Prop({ type: [FormFieldConfigSchema], default: defaultOfflineFormFields })
   offlineFormFields!: FormFieldConfig[];
 
+  // "Web Widget security" tab's Blocked countries feature — matches
+  // Zendesk's own behavior (per direct user request/reference screenshot):
+  // restricts the WIDGET'S CHAT functionality (not the widget's visibility
+  // itself — the launcher/branding still loads) for a visitor whose
+  // GeoIP-resolved country is in this list, while `blockedCountriesEnabled`
+  // is on. `blockedCountries` holds ISO 3166-1 alpha-2 codes (e.g. "PK"),
+  // the same shape `AttributionService`'s `location.country` already
+  // produces — enforced in `VisitorSessionService.init` (the "start a
+  // chat" entry point), same place/pattern as the existing banned-IP/
+  // banned-visitor checks. See WidgetConfigScreen's Security tab and
+  // PROGRESS.md for the full feature writeup.
+  @Prop({ required: true, default: false })
+  blockedCountriesEnabled!: boolean;
+
+  @Prop({ type: [String], default: [] })
+  blockedCountries!: string[];
+
   createdAt!: Date;
   updatedAt!: Date;
 }

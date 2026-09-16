@@ -133,4 +133,30 @@ describe('T-05 TC-05.2 — Ban enforcement (FR-VIS-07)', () => {
       .send({ siteId: targetSiteId, pageUrl: 'https://site-d.example.com/' })
       .expect(200);
   });
+
+  /**
+   * Feature-2a-backend — `BannedEntry` replaced `Site.bannedIps`/
+   * `Visitor.isBanned` as the ban model. `POST :siteId/visitors/ban-ip`
+   * (Banned Visitors screen's "Add banned IP address") writes a `BannedEntry`
+   * with no Visitor behind it at all; this proves `VisitorSessionService
+   * .init()`'s enforcement reads `BannedEntry` directly (not the old
+   * `Site.bannedIps` array) for that path too, not just the Visitor-id ban
+   * path TC-05.2a-c already cover.
+   */
+  it('TC-05.2e: an IP banned via ban-ip (no Visitor involved) is rejected at session init', async () => {
+    const ip = nextFakeIp();
+
+    await request(server)
+      .post(`/sites/${targetSiteId}/visitors/ban-ip`)
+      .set(...OWNER_AUTH)
+      .send({ ip, reason: 'Abuse from anonymous scanner' })
+      .expect(204);
+
+    const rejected = await request(server)
+      .post('/visitor-session/init')
+      .set('X-Forwarded-For', ip)
+      .send({ siteId: targetSiteId, pageUrl: 'https://site-d.example.com/' })
+      .expect(403);
+    expect(rejected.body.message).toMatch(/ip address has been banned/i);
+  });
 });

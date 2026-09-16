@@ -62,6 +62,7 @@ export class VisitorSessionController {
       sessionToken,
       pageUrl: dto.pageUrl,
       referrer: dto.referrer,
+      pageTitle: dto.pageTitle,
       visitSessionId: dto.visitSessionId,
       userAgent: req.headers['user-agent'],
       ip: extractClientIp(req),

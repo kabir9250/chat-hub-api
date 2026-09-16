@@ -3,12 +3,18 @@ import { InjectModel } from '@nestjs/mongoose';
 import { FilterQuery, Model, Types } from 'mongoose';
 
 import {
+  BannedEntry,
+  BannedEntryDocument,
   Conversation,
   ConversationDocument,
+  Department,
+  DepartmentDocument,
   PageVisit,
   PageVisitDocument,
   Site,
   SiteDocument,
+  User,
+  UserDocument,
   Visitor,
   VisitorDocument,
 } from '../database/schemas';
@@ -21,6 +27,7 @@ import { VisitorPresenceService } from '../realtime/visitor-presence.service';
 import { UpdateVisitorDto } from './dto/update-visitor.dto';
 import { ListVisitorsCombinedQueryDto } from './dto/list-visitors-combined.query.dto';
 import { ListVisitsQueryDto } from './dto/list-visits.query.dto';
+import { ListBannedQueryDto } from './dto/list-banned.query.dto';
 import {
   computeVisitorPathLowerBound,
   groupIntoVisits,
@@ -45,6 +52,28 @@ export interface CombinedVisitorListResult extends VisitorListResult {
   siteIds: string[];
 }
 
+/**
+ * One row of the Banned Visitors screen (Settings → Banned) — now one row
+ * per `BannedEntry` document (Feature-2a-backend), not a merge-on-read over
+ * `Visitor.isBanned` + audit-log lookups. `kind` still distinguishes the two
+ * shapes the reference screenshot mixes in one column: a `'visitor'` row
+ * (`visitorId` populated — banned via History → "Ban visitor") and an
+ * `'ip'` row (`visitorId: null` — banned via "Add banned IP address" with no
+ * Visitor behind it). See `VisitorsService.findBanned`.
+ */
+export interface BannedVisitorRow {
+  /** The `BannedEntry` document id — stable, and now a real deletable/listable row key (not a synthesized `ip:<address>` string). */
+  id: string;
+  kind: 'visitor' | 'ip';
+  visitorId: string | null;
+  /** Display label for the identifier column — name/email if known, else `Visitor <id suffix>` (same fallback convention `VisitorRow.tsx`/`PendingMenu.tsx` already use), else the raw banned IP. */
+  label: string;
+  ip: string | null;
+  reason: string | null;
+  /** ISO timestamp of `BannedEntry.createdAt` — always populated now (every ban path writes one), unlike the old audit-log-lookup which could come back `null`. */
+  bannedAt: string | null;
+}
+
 export interface LiveVisitor {
   visitorId: string;
   /** Phase 2, FR-P2-SITE-03 — always populated (single-Site call already
@@ -55,6 +84,9 @@ export interface LiveVisitor {
   email: string | null;
   currentPage: string | null;
   pageCategory: string | null;
+  /** Visitors "Group by Page title" (this session) — see
+   * `PageVisit.pageTitle`'s doc comment. */
+  pageTitle: string | null;
   enteredCurrentPageAt: string | null;
   location: {
     city: string | null;
@@ -76,6 +108,14 @@ export interface LiveVisitor {
   pastVisitsCount: number;
   pastChatsCount: number;
   activeConversationId: string | null;
+  /** Visitors "Group by Serving agent"/"Group by Department" (this
+   * session) — the Agent/Department of the Visitor's `activeConversationId`
+   * Conversation, if any. `null` whenever there's no active Conversation
+   * (nothing to be "served by" yet), or the Conversation is routed but not
+   * yet assigned to a specific Agent (`assignedAgentId: null`) — both cases
+   * the frontend buckets as "Unserved". */
+  servingAgentName: string | null;
+  departmentName: string | null;
 }
 
 /**
@@ -94,6 +134,14 @@ export class VisitorsService {
     private readonly conversationModel: Model<ConversationDocument>,
     @InjectModel(PageVisit.name)
     private readonly pageVisitModel: Model<PageVisitDocument>,
+    // Visitors "Group by Serving agent"/"Group by Department" (this
+    // session) — read-only lookups to resolve an active Conversation's
+    // assignedAgentId/departmentId to a display name.
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
+    @InjectModel(Department.name)
+    private readonly departmentModel: Model<DepartmentDocument>,
+    @InjectModel(BannedEntry.name)
+    private readonly bannedEntryModel: Model<BannedEntryDocument>,
     private readonly auditLogService: AuditLogService,
     private readonly leadsService: LeadsService,
     private readonly realtimeEvents: RealtimeEventsService,
@@ -188,7 +236,10 @@ export class VisitorsService {
           status: { $ne: 'closed' },
         })
         .sort({ startedAt: -1 })
-        .select('_id visitorId')
+        // Visitors "Group by Serving agent"/"Group by Department" (this
+        // session) — pulled alongside `_id` so the caller can resolve a
+        // display name for each without a second round-trip per row.
+        .select('_id visitorId assignedAgentId departmentId')
         .lean()
         .exec(),
     ]);
@@ -199,22 +250,93 @@ export class VisitorsService {
     // sort() above puts the most recent first; only the first match per
     // visitorId (Map.set on a repeat key is a no-op-equivalent overwrite,
     // so iterate in order and only set if absent) should win.
-    const conversationByVisitor = new Map<string, Types.ObjectId>();
+    const conversationByVisitor = new Map<
+      string,
+      (typeof activeConversations)[number]
+    >();
     for (const conv of activeConversations) {
       const key = conv.visitorId.toString();
       if (!conversationByVisitor.has(key)) {
-        conversationByVisitor.set(key, conv._id);
+        conversationByVisitor.set(key, conv);
       }
     }
 
-    return visitors.map((v) =>
-      this.mapLiveVisitorRow(
+    const { agentNames, departmentNames } =
+      await this.resolveConversationNames(activeConversations);
+
+    return visitors.map((v) => {
+      const conv = conversationByVisitor.get(v._id.toString());
+      return this.mapLiveVisitorRow(
         v,
         siteId,
         pageByVisitor.get(v._id.toString()),
-        conversationByVisitor.get(v._id.toString()),
+        conv?._id,
+        conv?.assignedAgentId
+          ? (agentNames.get(conv.assignedAgentId.toString()) ?? null)
+          : null,
+        conv?.departmentId
+          ? (departmentNames.get(conv.departmentId.toString()) ?? null)
+          : null,
+      );
+    });
+  }
+
+  /** Visitors "Group by Serving agent"/"Group by Department" (this session)
+   * — shared by `buildLiveVisitorsForSite`/`getLiveVisitor`: batch-resolves
+   * every distinct `assignedAgentId`/`departmentId` among a set of active
+   * Conversations to their display names in (up to) two queries total,
+   * rather than one per Visitor. */
+  private async resolveConversationNames(
+    conversations: Array<{
+      assignedAgentId?: Types.ObjectId | null;
+      departmentId?: Types.ObjectId | null;
+    }>,
+  ): Promise<{
+    agentNames: Map<string, string>;
+    departmentNames: Map<string, string>;
+  }> {
+    const agentIds = [
+      ...new Set(
+        conversations
+          .map((c) => c.assignedAgentId?.toString())
+          .filter((id): id is string => !!id),
       ),
-    );
+    ];
+    const departmentIds = [
+      ...new Set(
+        conversations
+          .map((c) => c.departmentId?.toString())
+          .filter((id): id is string => !!id),
+      ),
+    ];
+
+    const [agents, departments] = await Promise.all([
+      agentIds.length
+        ? this.userModel
+            .find({
+              _id: { $in: agentIds.map((id) => new Types.ObjectId(id)) },
+            })
+            .select('_id displayName')
+            .lean()
+            .exec()
+        : Promise.resolve([]),
+      departmentIds.length
+        ? this.departmentModel
+            .find({
+              _id: { $in: departmentIds.map((id) => new Types.ObjectId(id)) },
+            })
+            .select('_id name')
+            .lean()
+            .exec()
+        : Promise.resolve([]),
+    ]);
+
+    return {
+      agentNames: new Map(agents.map((a) => [a._id.toString(), a.displayName])),
+      departmentNames: new Map(
+        departments.map((d) => [d._id.toString(), d.name]),
+      ),
+    };
   }
 
   /**
@@ -243,7 +365,11 @@ export class VisitorsService {
 
     const [visitor, openPage, activeConversation] = await Promise.all([
       this.visitorModel
-        .findOne({ _id: visitorObjectId, siteId: siteObjectId, isBanned: false })
+        .findOne({
+          _id: visitorObjectId,
+          siteId: siteObjectId,
+          isBanned: false,
+        })
         .lean()
         .exec(),
       this.pageVisitModel
@@ -258,17 +384,29 @@ export class VisitorsService {
           status: { $ne: 'closed' },
         })
         .sort({ startedAt: -1 })
-        .select('_id')
+        .select('_id assignedAgentId departmentId')
         .lean()
         .exec(),
     ]);
     if (!visitor) return null;
+
+    const { agentNames, departmentNames } = await this.resolveConversationNames(
+      activeConversation ? [activeConversation] : [],
+    );
 
     return this.mapLiveVisitorRow(
       visitor,
       siteId,
       openPage ?? undefined,
       activeConversation?._id,
+      activeConversation?.assignedAgentId
+        ? (agentNames.get(activeConversation.assignedAgentId.toString()) ??
+            null)
+        : null,
+      activeConversation?.departmentId
+        ? (departmentNames.get(activeConversation.departmentId.toString()) ??
+            null)
+        : null,
     );
   }
 
@@ -278,6 +416,8 @@ export class VisitorsService {
     siteId: string,
     page: PageVisit | undefined,
     activeConversationId: Types.ObjectId | undefined,
+    servingAgentName: string | null,
+    departmentName: string | null,
   ): LiveVisitor {
     return {
       visitorId: v._id.toString(),
@@ -286,6 +426,7 @@ export class VisitorsService {
       email: v.email ?? null,
       currentPage: page?.pageUrl ?? null,
       pageCategory: page?.pageCategory ?? null,
+      pageTitle: page?.pageTitle ?? null,
       enteredCurrentPageAt: page?.enteredAt
         ? page.enteredAt.toISOString()
         : null,
@@ -306,6 +447,8 @@ export class VisitorsService {
       activeConversationId: activeConversationId
         ? activeConversationId.toString()
         : null,
+      servingAgentName,
+      departmentName,
     };
   }
 
@@ -322,6 +465,120 @@ export class VisitorsService {
     }
 
     return this.visitorModel.find(filter).sort({ lastSeenAt: -1 }).exec();
+  }
+
+  /**
+   * Banned Visitors screen (Settings → Banned) — Feature-2a-backend: now
+   * reads `BannedEntry` rows directly instead of merging
+   * `Visitor.isBanned: true` scans with best-effort audit-log lookups for
+   * date/reason. One `BannedEntry` = one row; `kind` is derived from whether
+   * `visitorId` is set. `search` matches (case-insensitive substring) IP,
+   * Visitor name/email, or reason; `dateFrom`/`dateTo` filter on
+   * `createdAt`, inclusive, same convention `DateRangeQueryDto` uses
+   * elsewhere (FR-RPT filters) — `dateTo` is treated as end-of-day so a
+   * same-day `dateFrom`/`dateTo` still includes that whole day.
+   */
+  async findBanned(
+    actor: AuthenticatedUser,
+    siteId: string,
+    query: ListBannedQueryDto = {},
+  ): Promise<BannedVisitorRow[]> {
+    const site = await this.assertSite(actor, siteId);
+
+    const filter: FilterQuery<BannedEntryDocument> = { siteId: site._id };
+    if (query.dateFrom || query.dateTo) {
+      filter.createdAt = {};
+      if (query.dateFrom) filter.createdAt.$gte = new Date(query.dateFrom);
+      if (query.dateTo) {
+        const end = new Date(query.dateTo);
+        end.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = end;
+      }
+    }
+
+    const entries = await this.bannedEntryModel
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+
+    const visitorIds = entries
+      .map((e) => e.visitorId)
+      .filter((id): id is Types.ObjectId => !!id);
+    const visitors = visitorIds.length
+      ? await this.visitorModel
+          .find({ _id: { $in: visitorIds } })
+          .select('_id name email')
+          .lean()
+          .exec()
+      : [];
+    const visitorById = new Map(visitors.map((v) => [v._id.toString(), v]));
+
+    const rows: BannedVisitorRow[] = entries.map((e) => {
+      const id = e._id.toString();
+      const visitor = e.visitorId
+        ? visitorById.get(e.visitorId.toString())
+        : undefined;
+      const label = e.visitorId
+        ? visitor?.name ||
+          visitor?.email ||
+          `Visitor ${e.visitorId.toString().slice(-6)}`
+        : (e.ipAddress ?? '(unknown IP)');
+      return {
+        id,
+        kind: e.visitorId ? 'visitor' : 'ip',
+        visitorId: e.visitorId ? e.visitorId.toString() : null,
+        label,
+        ip: e.ipAddress,
+        reason: e.reason,
+        bannedAt: e.createdAt.toISOString(),
+      };
+    });
+
+    if (!query.search) return rows;
+    const q = query.search.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(
+      (r) =>
+        r.label.toLowerCase().includes(q) ||
+        (r.ip ?? '').toLowerCase().includes(q) ||
+        (r.reason ?? '').toLowerCase().includes(q),
+    );
+  }
+
+  /**
+   * "Add banned IP address" — the Banned Visitors screen's own creation
+   * flow (Settings → Banned → Add visitor), direct user request. Bans a raw
+   * IP with no Visitor behind it at all: writes one `BannedEntry` with
+   * `visitorId: null` (Feature-2a-backend — was a push onto
+   * `Site.bannedIps` before this session; `VisitorSessionService.init()`'s
+   * enforcement now queries `BannedEntry` by `{siteId, ipAddress}`, so this
+   * needs no separate enforcement wiring).
+   */
+  async banIp(
+    actor: AuthenticatedUser,
+    siteId: string,
+    ip: string,
+    reason?: string,
+  ): Promise<void> {
+    const site = await this.assertSite(actor, siteId);
+
+    await this.bannedEntryModel.create({
+      siteId: site._id,
+      visitorId: null,
+      ipAddress: ip,
+      reason: reason || null,
+      createdByUserId: new Types.ObjectId(actor.userId),
+    });
+
+    await this.auditLogService.record({
+      actorType: 'user',
+      actorId: actor.userId,
+      action: 'visitor.banned',
+      siteId: site._id,
+      targetType: 'ip',
+      metadata: { ip, reason: reason || undefined },
+    });
   }
 
   /**
@@ -536,17 +793,80 @@ export class VisitorsService {
   }
 
   /**
+   * Session Feature-2c-complex-actions (SRS §2.2 "Block visitor" action) —
+   * the Trigger-driven counterpart to `ban()` above. GUARDRAIL: reuses
+   * Feature 2a's exact `BannedEntry` mechanism (same schema, same
+   * `visitor.isBanned` sync, same `emitProfileUpdated` live-panel refresh) —
+   * this is not a parallel ban path, just a different caller. Split out
+   * because a Trigger match has no `AuthenticatedUser` actor to satisfy
+   * `ban()`'s `assertSite(actor, siteId)`/organization check: the caller
+   * (`RealtimeGateway.handleVisitorTriggerActivated`) has already loaded and
+   * validated `visitor`/`site` itself via the Visitor's own verified socket
+   * session, so there is nothing left for an actor-based re-check to add.
+   * `createdByUserId: null` + `actorType: 'system'` on the audit entry (same
+   * precedent `ConversationsService`/`VisitorSessionService` already use for
+   * automatic, non-human-initiated actions) record this honestly as system-
+   * initiated rather than attributing it to whichever Admin happened to
+   * configure the Trigger.
+   */
+  async banFromTrigger(
+    site: SiteDocument,
+    visitor: VisitorDocument,
+    reason?: string,
+  ): Promise<void> {
+    visitor.isBanned = true;
+    await visitor.save();
+
+    await this.bannedEntryModel.create({
+      siteId: site._id,
+      visitorId: visitor._id,
+      ipAddress: visitor.currentIp ?? null,
+      reason: reason || null,
+      createdByUserId: null,
+    });
+
+    await this.auditLogService.record({
+      actorType: 'system',
+      action: 'visitor.banned',
+      siteId: site._id,
+      targetType: 'Visitor',
+      targetId: visitor._id,
+      metadata: {
+        ip: visitor.currentIp ?? undefined,
+        reason: reason || undefined,
+        source: 'trigger',
+      },
+    });
+
+    await this.emitProfileUpdated(visitor);
+  }
+
+  /**
    * FR-VIS-07: Ban a Visitor by id, and also block by IP — the Visitor's
-   * `currentIp` (or an explicit override, e.g. from server logs) is added
-   * to the Site's `bannedIps` list so the ban survives the Visitor clearing
+   * `currentIp` (or an explicit override, e.g. from server logs) is banned
+   * alongside them so the ban survives the Visitor clearing
    * cookies/localStorage and coming back as an anonymous new session
    * (enforced in VisitorSessionService.init).
+   *
+   * Feature-2a-backend: writes one `BannedEntry` (`visitorId` + `ipAddress`
+   * both populated) instead of flipping `Visitor.isBanned` and pushing onto
+   * `Site.bannedIps`. `visitor.isBanned` is still set `true` alongside it —
+   * kept in sync rather than removed outright (still read by
+   * `findAll`/`findLive`'s "hide banned Visitors from the live list" filter
+   * and the existing `banned=true/false` list filter — out of this task's
+   * scope to touch) — but is no longer what enforcement or the Banned
+   * Visitors screen actually trust; `BannedEntry` is the source of truth for
+   * both now. `ipToBan` can be `null` (a Visitor with no `currentIp` on file
+   * and no override given) — still recorded as a Visitor-only ban so
+   * unbanning has something to look up, it just enforces nothing on the IP
+   * side (there's no IP known to enforce).
    */
   async ban(
     actor: AuthenticatedUser,
     siteId: string,
     visitorId: string,
     ipOverride?: string,
+    reason?: string,
   ): Promise<VisitorDocument> {
     const site = await this.assertSite(actor, siteId);
     const visitor = await this.findVisitorOnSite(site, visitorId);
@@ -554,11 +874,15 @@ export class VisitorsService {
     visitor.isBanned = true;
     await visitor.save();
 
-    const ipToBan = ipOverride ?? visitor.currentIp;
-    if (ipToBan && !site.bannedIps.includes(ipToBan)) {
-      site.bannedIps.push(ipToBan);
-      await site.save();
-    }
+    const ipToBan = ipOverride ?? visitor.currentIp ?? null;
+
+    await this.bannedEntryModel.create({
+      siteId: site._id,
+      visitorId: visitor._id,
+      ipAddress: ipToBan,
+      reason: reason || null,
+      createdByUserId: new Types.ObjectId(actor.userId),
+    });
 
     await this.auditLogService.record({
       actorType: 'user',
@@ -567,7 +891,7 @@ export class VisitorsService {
       siteId: site._id,
       targetType: 'Visitor',
       targetId: visitor._id,
-      metadata: { ip: ipToBan ?? null },
+      metadata: { ip: ipToBan, reason: reason || undefined },
     });
 
     await this.emitProfileUpdated(visitor);
@@ -575,7 +899,13 @@ export class VisitorsService {
     return visitor;
   }
 
-  /** Not asked for by the SRS, but trivial and useful for reversing a mistaken ban / test cleanup — gated by the same `visitors.ban` permission. */
+  /**
+   * Not asked for by the SRS, but trivial and useful for reversing a
+   * mistaken ban / test cleanup — gated by the same `visitors.ban`
+   * permission. Feature-2a-backend: removes every `BannedEntry` for this
+   * Visitor (covers a Visitor banned more than once, e.g. re-banned after an
+   * earlier unban) rather than clearing a boolean/array entry.
+   */
   async unban(
     actor: AuthenticatedUser,
     siteId: string,
@@ -587,10 +917,9 @@ export class VisitorsService {
     visitor.isBanned = false;
     await visitor.save();
 
-    if (visitor.currentIp && site.bannedIps.includes(visitor.currentIp)) {
-      site.bannedIps = site.bannedIps.filter((ip) => ip !== visitor.currentIp);
-      await site.save();
-    }
+    await this.bannedEntryModel
+      .deleteMany({ siteId: site._id, visitorId: visitor._id })
+      .exec();
 
     await this.auditLogService.record({
       actorType: 'user',

@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 
 import { User, UserDocument } from '../database/schemas';
+import { RealtimeEventsService } from './realtime-events.service';
 
 export type PresenceStatus = 'online' | 'away' | 'offline';
 
@@ -40,6 +41,7 @@ export class PresenceService {
 
   constructor(
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
+    private readonly realtimeEvents: RealtimeEventsService,
   ) {}
 
   /** Call once per WebSocket connection. Returns the status now in effect. */
@@ -90,6 +92,47 @@ export class PresenceService {
       this.presence.set(userId, { status, socketIds: new Set() });
     }
     await this.persist(userId, status);
+  }
+
+  /**
+   * SRS §1.3 (Idle Timeout) — the automatic counterpart to `setStatus`
+   * above, called by `RealtimeGateway`'s `agent:presence.idle` handler when
+   * the FRONTEND's inactivity timer (Session Feature-1c-frontend) elapses.
+   * Deliberately a SEPARATE method rather than a new `setStatus` branch: it
+   * always clamps to `'away'` regardless of the caller's configured
+   * `idleStatus` (`'invisible'` is storable on `User.idleTimeoutSettings`
+   * per the SRS's literal shape — see that schema's doc comment — but
+   * `PresenceStatus` has no `'invisible'` value yet, so an Agent who
+   * configured `'invisible'` is auto-changed to `'away'` today; this
+   * narrows, not silently drops, the setting: nothing errors, and the
+   * stored `idleStatus: 'invisible'` preference is preserved for Feature 5
+   * to honor once it lands), and it emits `presence.autoStatusChanged` so
+   * SRS §1.2's "Status changes" desktop toggle / "Automatic status change"
+   * sound can fire — a manual `setStatus` call never emits that event, by
+   * design (guardrail: this is additive, the existing manual toggle's
+   * behavior is unchanged).
+   *
+   * No-ops (returns without emitting) if the User is already `'away'` or
+   * `'offline'` — nothing actually changed, so no "your status changed"
+   * notification should fire. `ignoreIfChatting` is entirely the caller's
+   * (frontend's) responsibility to evaluate before ever invoking this —
+   * the server has no visibility into open floating chat windows.
+   */
+  async setIdleStatus(userId: string): Promise<PresenceStatus> {
+    const previousStatus = this.getStatus(userId);
+    if (previousStatus !== 'online') return previousStatus;
+
+    await this.setStatus(userId, 'away');
+
+    this.realtimeEvents.emit({
+      kind: 'presence.autoStatusChanged',
+      userId,
+      status: 'away',
+      previousStatus,
+      timestamp: new Date().toISOString(),
+    });
+
+    return 'away';
   }
 
   getStatus(userId: string): PresenceStatus {

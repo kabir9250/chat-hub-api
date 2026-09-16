@@ -119,6 +119,7 @@ async function main() {
     PageVisit,
     Shortcut,
     Counter,
+    BannedEntry,
   } = models;
 
   // --- Clear every collection this script seeds (idempotent re-run) -----
@@ -136,6 +137,7 @@ async function main() {
     PageVisit.deleteMany({}),
     Shortcut.deleteMany({}),
     Counter.deleteMany({}),
+    BannedEntry.deleteMany({}),
   ]);
 
   const now = Date.now();
@@ -447,10 +449,32 @@ async function main() {
     const inserted = await Visitor.insertMany(visitorDocs);
     visitorsBySite[def.letter] = inserted;
     const namedCount = inserted.filter((v: any) => v.name).length;
-    const bannedCount = inserted.filter((v: any) => v.isBanned).length;
+    const bannedVisitors = inserted.filter((v: any) => v.isBanned);
     console.log(
-      `Created 20 Visitors for Site ${def.letter} (${namedCount} named, ${bannedCount} banned)`,
+      `Created 20 Visitors for Site ${def.letter} (${namedCount} named, ${bannedVisitors.length} banned)`,
     );
+
+    // Feature-2a-backend — `BannedEntry` is now the real source of truth for
+    // both ban enforcement and the Banned Visitors screen; `Visitor.isBanned`
+    // above is kept in sync but no longer trusted by either. Without a
+    // matching `BannedEntry` row, a fixture Visitor seeded `isBanned: true`
+    // would show as banned on its own profile but never actually be blocked
+    // at session init, and never appear on the Banned Visitors screen —
+    // silently inconsistent with every ban created through the real
+    // `ban()`/`banIp()` flows. `createdByUserId: owner._id` since `owner` is
+    // the one User guaranteed to exist on every seeded Site by this point.
+    if (bannedVisitors.length) {
+      await BannedEntry.insertMany(
+        bannedVisitors.map((v: any) => ({
+          siteId: site._id,
+          visitorId: v._id,
+          ipAddress: v.currentIp ?? null,
+          reason: 'Seeded as banned for testing.',
+          createdByUserId: owner._id,
+          createdAt: v.firstSeenAt,
+        })),
+      );
+    }
   }
 
   // --- Conversations: 50 per Site (200 total) + a Message pair each ------

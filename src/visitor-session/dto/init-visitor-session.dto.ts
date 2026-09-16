@@ -61,6 +61,19 @@ export class InitVisitorSessionDto {
   @IsString()
   referrer?: string;
 
+  // Visitors "Group by Page title" (this session) — the host page's
+  // `document.title`, forwarded by `public/embed.js` (the widget iframe
+  // can't read it directly, same reasoning as `pageUrl`/`referrer` above).
+  @ApiPropertyOptional({
+    example: 'Pricing — Acme Inc.',
+    description:
+      "The widget's current page title (document.title), forwarded by embed.js.",
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  pageTitle?: string;
+
   // Direct user feedback — "a new visit" should mean "the visitor closed
   // and reopened the tab," not "30+ minutes passed," and should NOT reset
   // just because the visitor left the tab open and browsed elsewhere for a
@@ -75,8 +88,8 @@ export class InitVisitorSessionDto {
   @ApiPropertyOptional({
     example: 'b6e4a1d2-9c3f-4e2a-8f1a-2d6c7b9e0f11',
     description:
-      "A per-tab id the widget generates via sessionStorage, stable for the " +
-      'tab\'s lifetime and different on every fresh tab. Used to decide ' +
+      'A per-tab id the widget generates via sessionStorage, stable for the ' +
+      "tab's lifetime and different on every fresh tab. Used to decide " +
       '"new visit" by tab-close instead of a time gap; omit for the old ' +
       'gap-based behavior.',
   })

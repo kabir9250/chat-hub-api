@@ -20,14 +20,18 @@ export interface AppConfig {
   };
   attribution: {
     /**
-     * Best-effort online geolocation fallback (`AttributionService`) for
-     * when `geoip-lite`'s bundled offline DB misses on a real (non-
-     * private/loopback) IP. Defaults ON; set to `false` for a fully
-     * offline/sandboxed environment with no outbound internet access — the
-     * fallback already fails silently on its own, but this avoids even
-     * attempting the call.
+     * Whether `AttributionService` tries the 3 online geolocation tiers
+     * (ipgeolocation.io, ipapi.co, ip-api.com) before falling back to the
+     * self-hosted MaxMind `.mmdb`. Defaults ON; set to `false` for a fully
+     * offline/sandboxed environment with no outbound internet access — each
+     * tier already fails silently on its own, but this skips even
+     * attempting the calls and goes straight to the local DB.
      */
     geoFallbackEnabled: boolean;
+    /** API key for ipgeolocation.io (tier 1) — free at ipgeolocation.io/signup. Tier 1 is skipped (falls through to tier 2) when unset. */
+    ipgeolocationIoApiKey: string | undefined;
+    /** Per-tier timeout (ms) for the 3 online geolocation lookups. Default 2000. */
+    geoLookupTimeoutMs: number;
   };
   /**
    * Phase 2 §3.9 (FR-P2-ATT-06/08) — object storage. `provider` is
@@ -87,6 +91,11 @@ export default (): { app: AppConfig } => ({
     },
     attribution: {
       geoFallbackEnabled: process.env.GEO_FALLBACK_ENABLED !== 'false',
+      ipgeolocationIoApiKey: process.env.IPGEOLOCATION_API_KEY || undefined,
+      geoLookupTimeoutMs: parseInt(
+        process.env.GEO_LOOKUP_TIMEOUT_MS ?? '2000',
+        10,
+      ),
     },
     storage: {
       provider: 'local-disk',

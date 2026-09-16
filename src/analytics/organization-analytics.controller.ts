@@ -57,7 +57,7 @@ export class OrganizationAnalyticsController {
 
   @ApiOperation({
     summary:
-      'Combined avg/median first-response + resolution time, overall/per-Agent/per-Site (FR-RPT-03/06, analytics.view_organization)',
+      'Combined avg/median first-response + resolution time + avg rating, overall/per-Agent/per-Site (FR-RPT-03/04/06, analytics.view_organization)',
   })
   @Get('response-times')
   @RequirePermission('analytics.view_organization', { siteSource: 'none' })

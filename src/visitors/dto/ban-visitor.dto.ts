@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIP, IsOptional } from 'class-validator';
+import { IsIP, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class BanVisitorDto {
   @ApiPropertyOptional({
@@ -11,4 +11,18 @@ export class BanVisitorDto {
   @IsOptional()
   @IsIP()
   ip?: string;
+
+  @ApiPropertyOptional({
+    example: 'Spam / abusive language',
+    description:
+      "Free-text reason, shown in the Banned Visitors screen's Reason " +
+      "column. The Agent Console UI (VisitorInfoPanel's Ban modal) requires " +
+      'this client-side, but it stays optional here — same posture as ' +
+      "BanIpDto's own `reason` — so an older caller/existing e2e test " +
+      'posting an empty body keeps working unchanged.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
 }

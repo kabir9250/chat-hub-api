@@ -72,6 +72,8 @@ export class WidgetConfigService {
       preChatFormEnabled: config.preChatFormEnabled,
       preChatFormFields: config.preChatFormFields.map((f) => ({ ...f })),
       offlineFormFields: config.offlineFormFields.map((f) => ({ ...f })),
+      blockedCountriesEnabled: config.blockedCountriesEnabled,
+      blockedCountries: [...config.blockedCountries],
     };
 
     if (dto.topTitle !== undefined) config.topTitle = dto.topTitle.trim();
@@ -132,6 +134,17 @@ export class WidgetConfigService {
       config.offlineFormFields = dto.offlineFormFields;
     }
 
+    if (dto.blockedCountriesEnabled !== undefined)
+      config.blockedCountriesEnabled = dto.blockedCountriesEnabled;
+    if (dto.blockedCountries !== undefined)
+      // Normalized upper-case — matches the shape `AttributionService`'s
+      // `location.country` (GeoIP-resolved) always produces, so the
+      // `.includes()` check in VisitorSessionService.init can compare
+      // directly with no per-request normalization.
+      config.blockedCountries = dto.blockedCountries.map((c) =>
+        c.toUpperCase(),
+      );
+
     await config.save();
 
     // FR-CFG-06: no embed-script change needed — the public bootstrap
@@ -160,6 +173,8 @@ export class WidgetConfigService {
           preChatFormEnabled: config.preChatFormEnabled,
           preChatFormFields: config.preChatFormFields.map((f) => ({ ...f })),
           offlineFormFields: config.offlineFormFields.map((f) => ({ ...f })),
+          blockedCountriesEnabled: config.blockedCountriesEnabled,
+          blockedCountries: [...config.blockedCountries],
         },
       },
     });

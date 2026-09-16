@@ -54,6 +54,34 @@ export class AuditLogService {
     private readonly auditLogModel: Model<AuditLogDocument>,
   ) {}
 
+  /**
+   * Read-only lookup — added for the Banned Visitors screen (Settings →
+   * Banned), which needs a real "Date created" per ban even though neither
+   * `Visitor` nor `Site.bannedIps` carries a ban timestamp of its own (see
+   * `VisitorsService.findBanned`'s doc comment). Every `ban()` call already
+   * writes a `visitor.banned` entry here via `record()` above — this just
+   * reads that back, most-recent first. Purely additive: does not touch
+   * `record()` or any write path, and changes nothing about what gets
+   * logged or when.
+   */
+  async findByAction(
+    siteId: string,
+    action: string,
+  ): Promise<
+    Array<{
+      targetId?: Types.ObjectId;
+      metadata?: Record<string, unknown>;
+      createdAt: Date;
+    }>
+  > {
+    return this.auditLogModel
+      .find({ siteId: new Types.ObjectId(siteId), action })
+      .select('targetId metadata createdAt')
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+  }
+
   async record(input: RecordAuditLogInput): Promise<void> {
     try {
       await this.auditLogModel.create({

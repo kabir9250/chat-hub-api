@@ -64,3 +64,9 @@ pids
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Self-hosted MaxMind GeoLite2 database (AttributionService final geo
+# fallback tier) — a binary blob refreshed via `npm run geoip:update`
+# (src/database/update-geoip-db.ts), never source, never committed. Each
+# environment (this dev machine, the VPS later) fetches its own copy.
+/geo-data

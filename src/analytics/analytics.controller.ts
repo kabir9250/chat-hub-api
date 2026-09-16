@@ -71,7 +71,7 @@ export class AnalyticsController {
 
   @ApiOperation({
     summary:
-      'Avg/median first-response + resolution time, overall and per Agent (FR-RPT-03, analytics.view_site)',
+      'Avg/median first-response + resolution time + avg rating, overall and per Agent (FR-RPT-03/04, analytics.view_site)',
   })
   @ApiParam(SITE_ID_PARAM)
   @Get('response-times')

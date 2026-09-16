@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
   Param,
   Patch,
   Post,
@@ -24,8 +25,10 @@ import { PermissionGuard } from '../rbac/guards/permission.guard';
 import { RequirePermission } from '../rbac/decorators/require-permission.decorator';
 import { VisitorsService } from './visitors.service';
 import { UpdateVisitorDto } from './dto/update-visitor.dto';
+import { BanIpDto } from './dto/ban-ip.dto';
 import { BanVisitorDto } from './dto/ban-visitor.dto';
 import { ListVisitsQueryDto } from './dto/list-visits.query.dto';
+import { ListBannedQueryDto } from './dto/list-banned.query.dto';
 
 const SITE_ID_PARAM = { name: 'siteId', example: '507f1f77bcf86cd799439011' };
 const VISITOR_ID_PARAM = {
@@ -76,6 +79,59 @@ export class VisitorsController {
     @Param('siteId') siteId: string,
   ) {
     return this.visitorsService.findLive(user, siteId);
+  }
+
+  @ApiOperation({
+    summary:
+      'List every currently-banned Visitor/IP on a Site, for the Banned ' +
+      'Visitors screen (visitors.ban)',
+    description:
+      'Settings → Banned. Merges every Visitor with isBanned=true with any ' +
+      'orphan Site.bannedIps entry (an IP banned with no still-banned ' +
+      'Visitor behind it) — see VisitorsService.findBanned. Read-only: does ' +
+      'not create, enforce, or lift a ban (POST/DELETE :visitorId/ban below ' +
+      'are still the only way to do that). Gated on visitors.ban rather than ' +
+      "visitors.view — the same permission this screen's own ban/unban " +
+      "actions require, per that feature's own strictness (every seeded " +
+      'Role holding visitors.ban also holds visitors.view today, so this ' +
+      "is a narrowing, not a widening, of who can reach a Visitor's data). " +
+      'Feature-2a-backend: supports `search` (IP/name/email/reason) and ' +
+      '`dateFrom`/`dateTo` filtering, now that each row is a real ' +
+      '`BannedEntry` document rather than a merge-on-read.',
+  })
+  @ApiParam(SITE_ID_PARAM)
+  @Get('banned')
+  @RequirePermission('visitors.ban')
+  findBanned(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('siteId') siteId: string,
+    @Query() query: ListBannedQueryDto,
+  ) {
+    return this.visitorsService.findBanned(user, siteId, query);
+  }
+
+  @ApiOperation({
+    summary: 'Ban a raw IP with no Visitor behind it (visitors.ban)',
+    description:
+      '"Add banned IP address" — the Banned Visitors screen\'s own creation ' +
+      'flow (Settings → Banned → Add visitor). Distinct from ' +
+      'POST :visitorId/ban below, which always starts from an already-known ' +
+      'Visitor; this bans a bare IP directly, with an optional Reason shown ' +
+      "in that screen's table. Same enforcement path either way — both add " +
+      'to `Site.bannedIps`, the one list `VisitorSessionService.init()` ' +
+      "checks. Registered before ':visitorId' for the same reason 'live'/" +
+      "'banned' are above.",
+  })
+  @ApiParam(SITE_ID_PARAM)
+  @Post('ban-ip')
+  @HttpCode(204)
+  @RequirePermission('visitors.ban')
+  banIp(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('siteId') siteId: string,
+    @Body() dto: BanIpDto,
+  ) {
+    return this.visitorsService.banIp(user, siteId, dto.ip, dto.reason);
   }
 
   @ApiOperation({
@@ -138,7 +194,9 @@ export class VisitorsController {
     summary: 'Ban a Visitor by id, and block their IP (visitors.ban)',
     description:
       'FR-VIS-07. Enforced at POST /visitor-session/init — a banned Visitor or ' +
-      'banned IP cannot start a new chat session on this Site.',
+      'banned IP cannot start a new chat session on this Site. `reason` is ' +
+      'optional here (see BanVisitorDto) but required client-side by the ' +
+      "Agent Console's own Ban modal — Zendesk-UI session follow-up.",
   })
   @ApiParam(SITE_ID_PARAM)
   @ApiParam(VISITOR_ID_PARAM)
@@ -150,7 +208,13 @@ export class VisitorsController {
     @Param('visitorId') visitorId: string,
     @Body() dto: BanVisitorDto,
   ) {
-    return this.visitorsService.ban(user, siteId, visitorId, dto.ip);
+    return this.visitorsService.ban(
+      user,
+      siteId,
+      visitorId,
+      dto.ip,
+      dto.reason,
+    );
   }
 
   @ApiOperation({

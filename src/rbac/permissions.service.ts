@@ -29,6 +29,17 @@ export interface EffectivePermissionsSummary {
    * Site the caller can already reach some other way.
    */
   siteNames: Record<string, string>;
+  /**
+   * This session's addition — the Site's configured `domains[]` (the "Site
+   * URL(s)" field in the Admin Panel's Site form), same keys as `siteNames`.
+   * Lets the Agent Console's "Simulate visitor" button (Visitors tab) open
+   * the actual site in a new tab the way Zendesk's does, without requiring
+   * `sites.view`/`sites.manage` (same rationale as `siteNames` above — this
+   * is not a security boundary). Empty array when the Site has no domain
+   * configured yet; the frontend disables the button in that case rather
+   * than opening a blank/invalid URL.
+   */
+  siteDomains: Record<string, string[]>;
 }
 
 /**
@@ -130,6 +141,7 @@ export class PermissionsService {
         organizationPermissions: [],
         sitePermissions: {},
         siteNames: {},
+        siteDomains: {},
       };
     }
 
@@ -179,15 +191,17 @@ export class PermissionsService {
     // query rather than two.
     const siteDocs = await this.siteModel
       .find({ _id: { $in: [...siteIds] } })
-      .select('name')
+      .select('name domains')
       .lean()
       .exec();
     const siteNames: Record<string, string> = {};
+    const siteDomains: Record<string, string[]> = {};
     for (const doc of siteDocs) {
       siteNames[doc._id.toString()] = doc.name;
+      siteDomains[doc._id.toString()] = doc.domains ?? [];
     }
 
-    return { organizationPermissions, sitePermissions, siteNames };
+    return { organizationPermissions, sitePermissions, siteNames, siteDomains };
   }
 
   /**
