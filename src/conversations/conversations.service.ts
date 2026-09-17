@@ -56,12 +56,13 @@ import { GetMessagesSinceQueryDto } from './dto/get-messages-since.query.dto';
 import { CONVERSATION_VIEW_PERMISSIONS } from './conversations.constants';
 import {
   computeVisitorPathLowerBound,
+  findVisitGroupAt,
   groupIntoVisits,
   VISIT_HISTORY_LOOKBACK,
 } from './current-visit.util';
 
-/** Session P2-5 redesign — a Conversation's own "Visitor path" is now
- * conversation-adjacency-bounded (see `computeConversationPath`'s doc
+/** Session P2-5/P2-6 redesign — a Conversation's own "Visitor path" is now
+ * visit-session-bounded (see `computeConversationPath`'s doc
  * comment), not just a list of pages: it also carries the attribution
  * label ("Direct traffic" / referring domain / UTM source) for however the
  * Visitor actually landed on THIS specific visit, not just their latest
@@ -611,28 +612,16 @@ export class ConversationsService {
         .lean()
         .exec();
       if (ref) {
-        const [previousConversation, recentDesc] = await Promise.all([
-          this.conversationModel
-            .findOne({
-              visitorId: ref.visitorId,
-              startedAt: { $lt: ref.startedAt },
-            })
-            .sort({ startedAt: -1 })
-            .select('startedAt')
-            .lean()
-            .exec(),
-          this.pageVisitModel
-            .find({ visitorId: ref.visitorId })
-            .sort({ enteredAt: -1 })
-            .limit(VISIT_HISTORY_LOOKBACK)
-            .lean()
-            .exec(),
-        ]);
+        const recentDesc = await this.pageVisitModel
+          .find({ visitorId: ref.visitorId })
+          .sort({ enteredAt: -1 })
+          .limit(VISIT_HISTORY_LOOKBACK)
+          .lean()
+          .exec();
         const visitGroups = groupIntoVisits(recentDesc);
         const boundary = computeVisitorPathLowerBound(
           visitGroups,
           ref.startedAt,
-          previousConversation?.startedAt ?? null,
         );
         startedAtRange.$lt = boundary;
       }
@@ -924,31 +913,19 @@ export class ConversationsService {
   }
 
   /**
-   * Session P2-5 redesign (direct user feedback, two rounds) — root cause of
-   * the first report (two screenshots: a returning Visitor's separate
-   * Conversations showing an identical "Visitor path"/"Past visits"): the
-   * previous implementation bounded a Conversation's path by a pure
-   * 30-minute PageVisit gap, so two real Conversations that happened only
-   * minutes apart landed in the SAME gap-derived group and shared its
-   * entire page list. The follow-up spec (a precise 4-visit walkthrough,
-   * including a first visit with NO chat at all) then surfaced a second gap
-   * in the first fix's own approach (bounding purely by adjacent
-   * Conversations): a Visitor's first-ever chat-less VISIT would bleed its
-   * pages into whichever LATER Conversation came next, since there was no
-   * earlier Conversation to bound against at all.
-   *
-   * `computeVisitorPathLowerBound` (`current-visit.util.ts`) is the actual
-   * fix — see its own doc comment for why it needs BOTH the previous
-   * Conversation's `startedAt` AND the gap-derived visit-session boundary,
-   * taking whichever is more recent. The upper bound is simpler: THIS
-   * Conversation's own `startedAt` if a later Conversation already exists
-   * (freezing this one's path at exactly what led into it — so the NEXT
-   * Conversation's own lower bound, which is this Conversation's
-   * `startedAt`, never overlaps with what this one already claims), or
-   * "now" if this is still the Visitor's most recent Conversation (so a
-   * LIVE Conversation's path keeps growing as the Visitor navigates,
-   * exactly like the old `extractCurrentVisit`-based "current visit" did —
-   * the two concepts are unified into one rule instead of two).
+   * Session P2-6 redesign (direct user feedback) — a Conversation's own
+   * "Visitor path" is now just "every PageVisit in the visit session THIS
+   * Conversation's `startedAt` falls inside," full stop. No Conversation-
+   * adjacency bound any more (see `computeVisitorPathLowerBound`'s own doc
+   * comment for the P2-5-vs-P2-6 history): a Visitor who starts a second
+   * chat minutes after the first, in the same still-open browsing visit,
+   * now sees the SAME (growing) trail on both — every page since the visit
+   * began, not just the slice between one chat and the next. The upper
+   * bound follows the same visit session: "now" while this Conversation's
+   * visit session is still the Visitor's current, open one (so a live
+   * chat's path keeps growing as they navigate); otherwise frozen at that
+   * visit session's own `endedAt` (the visit is over — no page after that
+   * point belongs to it).
    *
    * Also returns `attributionLabel` — the "Direct traffic"/referring-domain/
    * UTM chip for THIS Conversation's own path specifically, sourced from
@@ -992,51 +969,18 @@ export class ConversationsService {
     conversationStartedAt: Date,
     fallbackAttributionLabel: string,
   ): Promise<ConversationPathResult> {
-    const [previousConversation, hasNextConversation, recentDesc] =
-      await Promise.all([
-        this.conversationModel
-          .findOne({ visitorId, startedAt: { $lt: conversationStartedAt } })
-          .sort({ startedAt: -1 })
-          .select('startedAt')
-          .lean()
-          .exec(),
-        this.conversationModel.exists({
-          visitorId,
-          startedAt: { $gt: conversationStartedAt },
-        }),
-        this.pageVisitModel
-          .find({ visitorId })
-          .sort({ enteredAt: -1 })
-          .limit(VISIT_HISTORY_LOOKBACK)
-          .lean()
-          .exec(),
-      ]);
+    const recentDesc = await this.pageVisitModel
+      .find({ visitorId })
+      .sort({ enteredAt: -1 })
+      .limit(VISIT_HISTORY_LOOKBACK)
+      .lean()
+      .exec();
 
     const visitGroups = groupIntoVisits(recentDesc);
-    const lowerBoundInclusive = computeVisitorPathLowerBound(
-      visitGroups,
-      conversationStartedAt,
-      previousConversation?.startedAt ?? null,
-    );
-
-    // Upper bound is THIS Conversation's own `startedAt` — NOT the next
-    // Conversation's — whenever a later Conversation already exists.
-    // Bounding by the next Conversation's own start instead (an earlier,
-    // buggier version of this method) would let this Conversation's path
-    // silently absorb any pages the Visitor browsed AFTER this chat ended
-    // but BEFORE the next one started — exactly the pages the NEXT
-    // Conversation's own path (its own lowerBoundInclusive is this
-    // Conversation's startedAt) is supposed to own, producing the very
-    // "two Conversations sharing overlapping/duplicated path data" bug this
-    // whole redesign exists to fix. Only when this IS the Visitor's most
-    // recent Conversation (no later one yet) does the bound extend to "now"
-    // — so a still-open chat's path keeps growing live as the Visitor
-    // navigates during it (the same live behavior Session P2-4 built);
-    // once a next Conversation exists, this one's own path is frozen at
-    // exactly "what led into it."
-    const upperBoundInclusive = hasNextConversation
-      ? conversationStartedAt
-      : new Date();
+    const session = findVisitGroupAt(visitGroups, conversationStartedAt);
+    const sessionIsOpen = !session || session.isOpen;
+    const lowerBoundInclusive = session?.startedAt ?? new Date(0);
+    const upperBoundInclusive = sessionIsOpen ? new Date() : session.endedAt;
 
     const pages: ConversationPathPage[] = recentDesc.filter(
       (pv) =>
@@ -1045,24 +989,24 @@ export class ConversationsService {
     );
 
     // Direct user feedback ("Time on site" reading hours for a frozen,
-    // long-closed Conversation's own window) — `pages[0]` (most recent,
+    // long-over visit session's own window) — `pages[0]` (most recent,
     // since `pages` is desc-sorted) is this Conversation's own trailing
-    // page. In normal operation, once a LATER Conversation exists
-    // (`hasNextConversation`), that trailing page should already have a
-    // real `exitedAt`/`durationSeconds` — the Visitor's next real page
-    // visit (however much later) closes it out (`PageVisitsService
-    // .recordPageChange`, itself capped at `CURRENT_VISIT_GAP_MINUTES` as
-    // of this same fix). But it can still show up `null` here for older
-    // data written before that write-side cap existed. Rather than let the
-    // frontend's `useTimeOnSite`/`VisitorPathTrail` treat a `null`
+    // page. In normal operation, once the visit session is genuinely OVER
+    // (a gap/new tab started a later one), that trailing page should
+    // already have a real `exitedAt`/`durationSeconds` — the Visitor's next
+    // real page visit (however much later) closes it out
+    // (`PageVisitsService.recordPageChange`, itself capped at
+    // `CURRENT_VISIT_GAP_MINUTES`). But it can still show up `null` here for
+    // older data written before that write-side cap existed. Rather than
+    // let the frontend's `useTimeOnSite`/`VisitorPathTrail` treat a `null`
     // `exitedAt` as "still happening right now" (counting all the way to
-    // the REAL current moment — the exact wrong, wildly-inflated number the
-    // user's screenshots showed) for a Conversation that is definitely NOT
-    // live, patch a plain-object COPY with `exitedAt`/`durationSeconds`
-    // capped at this Conversation's own `upperBoundInclusive` — never
-    // written back to the database (`recentDesc` is `.lean()`, a plain
-    // object here, not a hydrated document with its own `.save()`).
-    if (hasNextConversation && pages.length > 0 && pages[0].exitedAt == null) {
+    // the REAL current moment) for a visit session that is definitely NOT
+    // live any more, patch a plain-object COPY with `exitedAt`/
+    // `durationSeconds` capped at this Conversation's own
+    // `upperBoundInclusive` — never written back to the database
+    // (`recentDesc` is `.lean()`, a plain object here, not a hydrated
+    // document with its own `.save()`).
+    if (!sessionIsOpen && pages.length > 0 && pages[0].exitedAt == null) {
       const capped = pages[0];
       pages[0] = {
         ...capped,

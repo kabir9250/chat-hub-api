@@ -686,22 +686,18 @@ export class VisitorsService {
    * `findAllCombined`'s own doc comment making the same point for Visitors
    * generally).
    *
-   * Session P2-5 redesign (direct user feedback, two rounds) —
-   * `query.beforeConversationId` scopes this the same way
-   * `ConversationsService.findAll`'s `beforeConversationId` scopes "Past
-   * chats": only visit sessions that ended at-or-before the lower bound of
-   * THAT Conversation's own "Visitor path" range count as "past" for it —
-   * i.e. exactly the visit sessions `ConversationsService`'s
-   * `computeConversationPath` does NOT already claim for that Conversation's
-   * own path, so the two drill-downs never show overlapping/duplicated page
-   * data. That lower bound is computed by the exact same
-   * `computeVisitorPathLowerBound` (`current-visit.util.ts`) —
-   * reused, not re-derived — so it correctly yields zero past visits for a
-   * Visitor's first-ever Conversation, AND correctly still counts an
-   * earlier, entirely chat-less visit session as one of the "past visits"
-   * for whichever LATER Conversation is the first to actually chat (the
-   * exact scenario the user's 4-visit walkthrough spec covers: visit 1 has
-   * no chat at all, but still counts as visit 2's one past visit).
+   * Session P2-6 redesign — `query.beforeConversationId` scopes this to
+   * visit sessions strictly before whichever one THAT Conversation's own
+   * `startedAt` falls inside (its "current visit," now also what
+   * `ConversationsService.computeConversationPath` shows as that
+   * Conversation's own "Visitor path" — Session P2-6 made that always the
+   * FULL current visit session, so "Past visits" now just needs to exclude
+   * that one session, not do any Conversation-adjacency math of its own).
+   * Reuses the same `computeVisitorPathLowerBound` (`current-visit.util.ts`)
+   * to find that session's own `startedAt` — still correctly yields zero
+   * past visits for a Visitor's first-ever Conversation, and still counts an
+   * earlier, entirely chat-less visit session as a "past visit" for
+   * whichever LATER Conversation is the first to actually chat.
    */
   async findVisits(
     actor: AuthenticatedUser,
@@ -736,19 +732,9 @@ export class VisitorsService {
         .lean()
         .exec();
       if (ref) {
-        const previousConversation = await this.conversationModel
-          .findOne({
-            visitorId: visitor._id,
-            startedAt: { $lt: ref.startedAt },
-          })
-          .sort({ startedAt: -1 })
-          .select('startedAt')
-          .lean()
-          .exec();
         const upperBoundExclusive = computeVisitorPathLowerBound(
           allVisits,
           ref.startedAt,
-          previousConversation?.startedAt ?? null,
         );
         allVisits = allVisits.filter(
           (g) => g.endedAt.getTime() <= upperBoundExclusive.getTime(),

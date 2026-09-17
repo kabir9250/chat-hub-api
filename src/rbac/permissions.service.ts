@@ -40,6 +40,16 @@ export interface EffectivePermissionsSummary {
    * than opening a blank/invalid URL.
    */
   siteDomains: Record<string, string[]>;
+  /**
+   * Each Site's `status` ('active' | 'inactive'), same keys as `siteNames`.
+   * An 'inactive' Site is paused, NOT deleted — its Conversations/Visitors
+   * and every other record stay exactly where they are. The frontends use
+   * this purely to drop a paused Site out of their Site dropdowns (and to
+   * re-pick a selection that lands on one); the data itself is untouched
+   * and comes straight back when the Site is re-activated. Not a security
+   * boundary either — same rationale as `siteNames` above.
+   */
+  siteStatuses: Record<string, 'active' | 'inactive'>;
 }
 
 /**
@@ -142,6 +152,7 @@ export class PermissionsService {
         sitePermissions: {},
         siteNames: {},
         siteDomains: {},
+        siteStatuses: {},
       };
     }
 
@@ -191,17 +202,28 @@ export class PermissionsService {
     // query rather than two.
     const siteDocs = await this.siteModel
       .find({ _id: { $in: [...siteIds] } })
-      .select('name domains')
+      .select('name domains status')
       .lean()
       .exec();
     const siteNames: Record<string, string> = {};
     const siteDomains: Record<string, string[]> = {};
+    const siteStatuses: Record<string, 'active' | 'inactive'> = {};
     for (const doc of siteDocs) {
       siteNames[doc._id.toString()] = doc.name;
       siteDomains[doc._id.toString()] = doc.domains ?? [];
+      // Pre-`status` Site documents (the field was added with a schema
+      // default, so anything written since has it) read as 'active' — a
+      // Site is only hidden from a dropdown on an explicit 'inactive'.
+      siteStatuses[doc._id.toString()] = doc.status ?? 'active';
     }
 
-    return { organizationPermissions, sitePermissions, siteNames, siteDomains };
+    return {
+      organizationPermissions,
+      sitePermissions,
+      siteNames,
+      siteDomains,
+      siteStatuses,
+    };
   }
 
   /**

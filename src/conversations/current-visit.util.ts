@@ -13,26 +13,20 @@
  * heuristic every mainstream web-analytics tool (GA, etc.) uses. Nothing in
  * the SRS mandates an exact number; 30 minutes is that common default.
  *
- * Session P2-5 redesign (direct user feedback, two rounds) — this file used
- * to ALSO back a Conversation's own "Visitor path" directly
- * (`extractCurrentVisit`/`findVisitAt`, an earlier version of this
- * function): two real Conversations happening only minutes apart landed in
- * the same gap-derived group and ended up sharing an identical page trail,
- * which was wrong. The FIRST fix tried bounding a Conversation's path
- * purely by its *adjacent Conversations* instead — but that broke a
- * different, equally real case the user's follow-up spec walked through
- * explicitly: a Visitor's first-ever VISIT with no chat at all, followed by
- * a second visit (days later) that does start a chat — pure
- * Conversation-adjacency has no earlier Conversation to bound against, so
- * it would let the first visit's (chat-less) pages silently bleed into the
- * second visit's own path.
- *
- * The actual rule needs BOTH signals — see
- * `computeVisitorPathLowerBound` below, used by
- * `ConversationsService.computeConversationPath`. `groupIntoVisits` here is
- * still exactly the right tool for "Past visits" (FR-P2-HIST-02) — distinct
- * browsing sessions, with or without a chat ever happening in them — and is
- * now ALSO one of the two inputs a Conversation's own path boundary needs.
+ * Session P2-5 redesign (direct user feedback, two rounds), later REVERSED
+ * in Session P2-6 (further direct user feedback) — P2-5 bounded a
+ * Conversation's own "Visitor path" by its *adjacent Conversations* as well
+ * as this gap-derived visit boundary, specifically so two real Conversations
+ * happening only minutes apart wouldn't share/duplicate an identical page
+ * trail. P2-6 reversed that: the user wants "Visitor path" to always show
+ * the FULL current visit's pages, growing live, unaffected by how many
+ * chats start/end during that same visit — so
+ * `computeVisitorPathLowerBound` below is now purely this gap/tab-derived
+ * visit boundary, with no Conversation-adjacency signal at all.
+ * `groupIntoVisits` here is still exactly the right tool for "Past visits"
+ * (FR-P2-HIST-02) — distinct browsing sessions, with or without a chat ever
+ * happening in them — and is the sole input a Conversation's own path
+ * boundary needs too.
  */
 export const CURRENT_VISIT_GAP_MINUTES = 30;
 
@@ -187,7 +181,7 @@ export function groupIntoVisits<
  * creation are two independent client events, so a few seconds' skew
  * between them is expected, not an error case to reject.
  */
-function findVisitGroupAt<T>(
+export function findVisitGroupAt<T>(
   groups: VisitGroup<T>[],
   atTime: Date,
 ): VisitGroup<T> | null {
@@ -215,36 +209,25 @@ function findVisitGroupAt<T>(
 }
 
 /**
- * Session P2-5 redesign — the lower bound for a Conversation's own "Visitor
- * path": everything strictly after this point belongs to THIS Conversation
- * (or the visit it happened during); everything at-or-before it belongs to
- * an earlier Conversation's path or to "Past visits". Two candidate signals,
- * the TIGHTER (more recent, i.e. later) of which wins:
+ * Session P2-6 redesign (direct user feedback — "Visitor path" should show
+ * every page of the CURRENT browsing visit, no matter how many chats happen
+ * during it, and should keep growing/persist across a chat starting, ending,
+ * or a new one starting) — the lower bound for a Conversation's own "Visitor
+ * path" is now purely the start of whichever gap/tab-derived visit session
+ * (`groupIntoVisits`) this Conversation's own `startedAt` falls inside.
  *
- *  (a) The Visitor's PREVIOUS Conversation's own `startedAt` — needed so two
- *      real Conversations that happen close together (within the same
- *      gap-derived visit session — the original bug report: two chats only
- *      minutes apart sharing an identical page trail) don't share/duplicate
- *      the same page list.
- *
- *  (b) The start of whichever gap-derived visit session (`groupIntoVisits`)
- *      this Conversation's own `startedAt` falls inside — needed so an
- *      EARLIER visit session that happened to have no Conversation in it at
- *      all (a Visitor who browsed and left with no chat, then came back
- *      later and DID chat) doesn't bleed its pages into this Conversation's
- *      path just because there was no previous Conversation to bound
- *      against.
- *
- * Taking the max of both closes both gaps: whichever signal is more recent
- * for this specific Conversation is the one that actually matters.
+ * This file used to ALSO take the Visitor's previous Conversation's own
+ * `startedAt` as a second candidate bound, so that two real Conversations
+ * happening minutes apart in the same visit wouldn't share/duplicate the
+ * same page list. Direct user feedback reversed that requirement: two chats
+ * in the same visit SHOULD show the same (growing) trail — the whole visit's
+ * pages, not just the slice between one chat and the next. Dropping that
+ * signal here is what makes them agree again.
  */
 export function computeVisitorPathLowerBound<T extends { enteredAt: Date }>(
   visitGroups: VisitGroup<T>[],
   conversationStartedAt: Date,
-  previousConversationStartedAt: Date | null,
 ): Date {
   const session = findVisitGroupAt(visitGroups, conversationStartedAt);
-  const sessionStartMs = session?.startedAt.getTime() ?? 0;
-  const previousConversationMs = previousConversationStartedAt?.getTime() ?? 0;
-  return new Date(Math.max(sessionStartMs, previousConversationMs));
+  return session?.startedAt ?? new Date(0);
 }
