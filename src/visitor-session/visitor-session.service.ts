@@ -356,7 +356,26 @@ export class VisitorSessionService {
       // reused forever, so "Past chats" could never be anything but 0 and
       // every visit's messages piled into one endless transcript.
       if (startsNewVisit) {
-        await this.closeChatsFromPreviousVisits(visitor, site);
+        // Deliberately NOT awaited (direct user feedback — "the visitor
+        // takes longer than expected to show up in the table"). This call
+        // waits out a grace delay to tell a stale disconnecting socket apart
+        // from a genuine second tab, and awaiting it held up the rest of
+        // `init()` — including the `visitor.incoming` broadcast below and,
+        // because the widget only opens its socket once `init()` RESOLVES,
+        // the `visitor.online` broadcast too. A returning visitor therefore
+        // took that delay longer to appear in the Agent Console than a
+        // brand-new one did.
+        //
+        // Nothing below depends on its result: it only closes Conversations
+        // from the visit that already ended, and broadcasts
+        // `conversation.updated` itself when it does. Errors are logged
+        // rather than surfaced — a failure here must not break session init
+        // (same posture as the PageVisit write below).
+        void this.closeChatsFromPreviousVisits(visitor, site).catch((err) => {
+          this.logger.warn(
+            `Failed to close previous visits' chats: ${(err as Error).message}`,
+          );
+        });
       }
     } else {
       visitor = await this.visitorModel.create({
