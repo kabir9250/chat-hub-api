@@ -533,7 +533,31 @@ export class VisitorSessionService {
     visitor: VisitorDocument,
     site: SiteDocument,
   ): Promise<void> {
-    if (this.visitorPresence.isConnected(visitor._id.toString())) return;
+    // Race fix (direct user feedback — "agent sees the previous chat as
+    // Current, not Past," reproduced on the live deployment): this method
+    // only ever runs from `init()`, which — per the widget's own boot order
+    // (`boot()`'s REST call always completes before the socket effect even
+    // creates THIS tab's own socket, see WidgetApp.tsx) — means a `true`
+    // here can never be the new tab's own connection; it can only be an
+    // older one. The multi-tab guard's intent is "don't close a chat a
+    // SECOND, still-open tab is using," but a single instantaneous read
+    // can't tell that apart from "the closed tab's own socket hasn't
+    // finished disconnecting yet" (`pagehide` sends a real close frame
+    // synchronously, but the server processing it is not instant) — and on
+    // a live deployment, that window was wide enough to reproduce the bug
+    // for real (confirmed via direct DB inspection: a conversation the
+    // Visitor had already left stayed `open`/reused across a fresh tab).
+    // A short re-check closes that window: a genuinely dying connection
+    // will have finished disconnecting well within this delay; a real
+    // second tab is still there either way. Deliberately NOT solved by
+    // `VisitorPresenceService.isForeground` — that only reflects the
+    // widget bubble being expanded, `false` for the ordinary "second tab
+    // open, chat bubble minimized" case, so using it here would wrongly
+    // close a live second tab's conversation.
+    if (this.visitorPresence.isConnected(visitor._id.toString())) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      if (this.visitorPresence.isConnected(visitor._id.toString())) return;
+    }
 
     const stale = await this.conversationModel
       .find({
