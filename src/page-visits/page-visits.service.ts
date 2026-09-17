@@ -274,6 +274,33 @@ export class PageVisitsService {
   }
 
   /**
+   * Zombie-outreach fix — when did the visit that is now ENDING begin?
+   * Called from `VisitorSessionService.closeChatsFromPreviousVisits`, which
+   * runs before this visit's own first PageVisit is recorded, so the latest
+   * record still belongs to the previous visit. Returns the `enteredAt` of
+   * the earliest PageVisit sharing that record's `visitSessionId` — i.e. the
+   * start of that whole visit, not just its last page. `null` when there is
+   * no prior PageVisit at all, or the latest one predates `visitSessionId`
+   * tracking (caller then has no boundary to compare against and treats
+   * every unanswered outreach as old, which is the safe direction: a
+   * genuinely current-visit outreach always has a `visitSessionId`).
+   */
+  async getCurrentVisitStartedAt(
+    visitorId: Types.ObjectId | string,
+  ): Promise<Date | null> {
+    const latest = await this.pageVisitModel
+      .findOne({ visitorId })
+      .sort({ enteredAt: -1 })
+      .exec();
+    if (!latest?.visitSessionId) return null;
+    const first = await this.pageVisitModel
+      .findOne({ visitorId, visitSessionId: latest.visitSessionId })
+      .sort({ enteredAt: 1 })
+      .exec();
+    return first?.enteredAt ?? latest.enteredAt;
+  }
+
+  /**
    * T-05 TC-05.3b fix (SRS §4.4a: PageVisit.exitedAt is set "when the
    * Visitor navigates away, closes the tab, or the session ends" — this is
    * the "closes the tab" trigger; "navigates away" is `recordPageChange`

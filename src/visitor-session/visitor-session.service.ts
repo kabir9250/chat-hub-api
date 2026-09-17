@@ -559,6 +559,16 @@ export class VisitorSessionService {
       if (this.visitorPresence.isConnected(visitor._id.toString())) return;
     }
 
+    // Start of the visit that is ENDING (this runs before the new visit's
+    // own PageVisit is recorded) — the boundary the unanswered-outreach
+    // carve-out below is measured against. `null` (no prior PageVisit, or
+    // one predating visitSessionId tracking) uses the epoch, so every
+    // unanswered outreach reads as "from an older visit" and gets closed
+    // rather than lingering — the safe direction; see the loop's comment.
+    const visitStartedAt =
+      (await this.pageVisitsService.getCurrentVisitStartedAt(visitor._id)) ??
+      new Date(0);
+
     const stale = await this.conversationModel
       .find({
         visitorId: visitor._id,
@@ -568,11 +578,30 @@ export class VisitorSessionService {
       .exec();
 
     for (const conversation of stale) {
+      // Zombie-outreach fix (direct user feedback, reproduced on the live
+      // deployment and confirmed in the DB): the unanswered-proactive-
+      // outreach carve-out below used to skip on `hasVisitorMessage` ALONE,
+      // which never re-evaluated as visits went by. An Agent outreach the
+      // Visitor never opened therefore stayed `open` FOREVER — and since
+      // "current chat" is "most recent non-closed Conversation"
+      // (VisitorsService) and `startProactiveConversation` reuses any
+      // non-closed one, every later visit's Agent messages kept landing in
+      // that dead Conversation, which the returning Visitor's widget has no
+      // idea about (it correctly starts a fresh visit), so they silently
+      // received nothing until they themselves sent a message.
+      //
+      // The carve-out's real intent was only ever to protect an outreach
+      // sent moments ago in the visit that is STILL current — not one
+      // abandoned in a visit that has since ended. `startedAt` older than
+      // this visit's own boundary means exactly that, so only a
+      // same-visit outreach is spared now.
       const hasVisitorMessage = await this.messageModel.exists({
         conversationId: conversation._id,
         senderType: 'visitor',
       });
-      if (!hasVisitorMessage) continue;
+      if (!hasVisitorMessage && conversation.startedAt >= visitStartedAt) {
+        continue;
+      }
 
       const before = conversation.status;
       conversation.status = 'closed';
