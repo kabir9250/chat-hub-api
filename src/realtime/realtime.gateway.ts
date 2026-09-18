@@ -43,6 +43,7 @@ import { PermissionsService } from '../rbac/permissions.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { PageVisitsService } from '../page-visits/page-visits.service';
 import { VisitorsService } from '../visitors/visitors.service';
+import { InternalConversationsService } from '../internal-conversations/internal-conversations.service';
 import type { AttachmentRefInput } from '../storage/attachment.types';
 import { PresenceService, PresenceStatus } from './presence.service';
 import { RealtimeEventsService } from './realtime-events.service';
@@ -58,6 +59,7 @@ import { WsHttpExceptionFilter } from './ws-http-exception.filter';
 import {
   agentRoom,
   conversationRoom,
+  internalConversationRoom,
   RealtimeSocketData,
   siteAlertRoom,
   siteRoom,
@@ -243,6 +245,8 @@ export class RealtimeGateway
     @InjectModel(Visitor.name)
     private readonly visitorModel: Model<VisitorDocument>,
     private readonly triggerActionExecutor: TriggerActionExecutorService,
+    // SRS Feature 4 (Team Panel) — backs the `internal:*` handlers below.
+    private readonly internalConversationsService: InternalConversationsService,
   ) {}
 
   afterInit() {
@@ -467,6 +471,35 @@ export class RealtimeGateway
             .to(agentRoom(event.userId))
             .emit('presence.autoStatusChanged', event);
           break;
+
+        // SRS Feature 4 — broadcast to the conversation's own room (for a
+        // window already open on either side) AND each participant's
+        // personal `agentRoom` (so a sidebar unread badge/notification
+        // updates even with no window open — same "room + personal room"
+        // double-target `conversation.created`'s `assignedAgentId` branch
+        // uses above).
+        case 'internalMessage.created': {
+          const [a, b] = event.participantIds;
+          this.server
+            .to(internalConversationRoom(a, b))
+            .to(agentRoom(a))
+            .to(agentRoom(b))
+            .emit('internalMessage:new', event.message);
+          break;
+        }
+
+        // Reuses the SAME client event as internalMessage.created — see
+        // RealtimeDomainEvent's doc comment for why (client upserts by id,
+        // no new event type needed, matching message.updated's precedent).
+        case 'internalMessage.updated': {
+          const [a, b] = event.participantIds;
+          this.server
+            .to(internalConversationRoom(a, b))
+            .to(agentRoom(a))
+            .to(agentRoom(b))
+            .emit('internalMessage:new', event.message);
+          break;
+        }
       }
     });
 
@@ -1297,6 +1330,223 @@ export class RealtimeGateway
     );
 
     return { event: 'presence_set', data: { status } };
+  }
+
+  // -----------------------------------------------------------------------
+  // Internal (Agent-to-Agent) conversations — SRS Feature 4. Deliberately
+  // `@UseGuards(WsJwtGuard)` ONLY, no `PermissionGuard`/`@RequirePermission`
+  // anywhere in this block: the SRS's own scope decision is "Organization-
+  // wide... the ABILITY TO MESSAGE someone, once you can see them, isn't
+  // further gated" — no `conversations.view_*`/Site-scoped permission
+  // applies to this domain at all, matching visitor-side handlers' equally
+  // deliberate lack of PermissionGuard just below (different reason —
+  // visitors hold no RBAC permissions — same shape). Every handler still
+  // re-verifies the caller is actually a participant of the specific
+  // InternalConversation being acted on (`findByIdForParticipant`), the
+  // same "guard proves identity, service re-checks ownership" split
+  // `agent:join_conversation` above uses for visitor Conversations.
+  // -----------------------------------------------------------------------
+
+  /**
+   * Opens (find-or-create) the caller's 1:1 InternalConversation with
+   * `otherUserId` and joins its room — the internal-chat equivalent of
+   * `agent:join_conversation`. `otherUserId` must be a real, enabled User in
+   * the SAME Organization as the caller (Org-wide scope, task guardrail);
+   * anything else is rejected rather than silently creating a cross-tenant
+   * pairing.
+   */
+  @SubscribeMessage('internal:open_conversation')
+  @UseGuards(WsJwtGuard)
+  async handleInternalOpenConversation(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { otherUserId: string },
+  ) {
+    const { user } = client.data as RealtimeSocketData;
+    if (!data?.otherUserId || !Types.ObjectId.isValid(data.otherUserId)) {
+      return { event: 'error', data: { message: 'otherUserId is required.' } };
+    }
+    if (data.otherUserId === user!.userId) {
+      return {
+        event: 'error',
+        data: {
+          message: 'Cannot open an internal conversation with yourself.',
+        },
+      };
+    }
+
+    const other = await this.userModel
+      .findOne({
+        _id: data.otherUserId,
+        organizationId: user!.organizationId,
+        enabled: true,
+      })
+      .exec();
+    if (!other) {
+      return {
+        event: 'error',
+        data: { message: 'User not found in this Organization.' },
+      };
+    }
+
+    const conversation = await this.internalConversationsService.findOrCreate(
+      new Types.ObjectId(user!.organizationId),
+      new Types.ObjectId(user!.userId),
+      other._id,
+    );
+    await client.join(internalConversationRoom(user!.userId, data.otherUserId));
+
+    const messages = await this.internalConversationsService.listMessages(
+      conversation._id,
+    );
+
+    return {
+      event: 'internal_conversation_opened',
+      data: {
+        internalConversationId: conversation._id.toString(),
+        messages: messages.map((m) =>
+          this.internalConversationsService.toWire(m),
+        ),
+      },
+    };
+  }
+
+  @SubscribeMessage('internal:leave_conversation')
+  @UseGuards(WsJwtGuard)
+  async handleInternalLeaveConversation(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { otherUserId: string },
+  ) {
+    const { user } = client.data as RealtimeSocketData;
+    if (!data?.otherUserId) {
+      return { event: 'error', data: { message: 'otherUserId is required.' } };
+    }
+    await client.leave(
+      internalConversationRoom(user!.userId, data.otherUserId),
+    );
+    return { event: 'internal_conversation_left', data: {} };
+  }
+
+  /** Reuses InternalConversationsService.sendMessage — same rate limiter/bucket as agent:send_message (one cap per sending User, regardless of which chat domain the message belongs to). */
+  @SubscribeMessage('internal:send_message')
+  @UseGuards(WsJwtGuard)
+  async handleInternalSendMessage(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    data: { internalConversationId: string; body: string },
+  ) {
+    const { user } = client.data as RealtimeSocketData;
+    if (!data?.body?.trim()) {
+      return { event: 'error', data: { message: 'body is required.' } };
+    }
+    if (
+      !this.wsRateLimiter.consume(
+        `agent:send_message:${user!.userId}`,
+        AGENT_MESSAGE_SEND_LIMIT,
+        MESSAGE_SEND_WINDOW_MS,
+      )
+    ) {
+      return RATE_LIMIT_ERROR;
+    }
+
+    const conversation =
+      await this.internalConversationsService.findByIdForParticipant(
+        new Types.ObjectId(user!.organizationId),
+        data.internalConversationId,
+        new Types.ObjectId(user!.userId),
+      );
+    if (!conversation) {
+      return {
+        event: 'error',
+        data: { message: 'Internal conversation not found.' },
+      };
+    }
+
+    try {
+      const message = await this.internalConversationsService.sendMessage(
+        conversation,
+        new Types.ObjectId(user!.userId),
+        data.body,
+      );
+      const [a, b] = conversation.participantIds.map((id) => id.toString());
+      this.realtimeEvents.emit({
+        kind: 'internalMessage.created',
+        internalConversationId: conversation._id.toString(),
+        participantIds: [a, b],
+        message: this.internalConversationsService.toWire(message),
+      });
+      return {
+        event: 'internal_message_sent',
+        data: { messageId: message._id.toString() },
+      };
+    } catch (err) {
+      return { event: 'error', data: { message: (err as Error).message } };
+    }
+  }
+
+  /**
+   * Symmetric read-receipt advance (SRS Feature 4 — "reuse the same tick
+   * UI, just apply it to both sides"). Called when the caller's floating
+   * window for this InternalConversation is in the foreground — same
+   * trigger shape as `visitor:conversation_foreground`, just from the
+   * User side and with no delivered/read asymmetry to account for.
+   */
+  @SubscribeMessage('internal:mark_read')
+  @UseGuards(WsJwtGuard)
+  async handleInternalMarkRead(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { internalConversationId: string },
+  ) {
+    const { user } = client.data as RealtimeSocketData;
+    const conversation =
+      await this.internalConversationsService.findByIdForParticipant(
+        new Types.ObjectId(user!.organizationId),
+        data?.internalConversationId,
+        new Types.ObjectId(user!.userId),
+      );
+    if (!conversation) {
+      return {
+        event: 'error',
+        data: { message: 'Internal conversation not found.' },
+      };
+    }
+
+    const updated = await this.internalConversationsService.markRead(
+      conversation,
+      new Types.ObjectId(user!.userId),
+    );
+    const [a, b] = conversation.participantIds.map((id) => id.toString());
+    for (const message of updated) {
+      this.realtimeEvents.emit({
+        kind: 'internalMessage.updated',
+        internalConversationId: conversation._id.toString(),
+        participantIds: [a, b],
+        message: this.internalConversationsService.toWire(message),
+      });
+    }
+
+    return {
+      event: 'internal_marked_read',
+      data: {
+        internalConversationId: conversation._id.toString(),
+        count: updated.length,
+      },
+    };
+  }
+
+  @SubscribeMessage('internal:typing')
+  @UseGuards(WsJwtGuard)
+  handleInternalTyping(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { otherUserId: string; isTyping: boolean },
+  ) {
+    const { user } = client.data as RealtimeSocketData;
+    if (!data?.otherUserId) return;
+    const room = internalConversationRoom(user!.userId, data.otherUserId);
+    if (!client.rooms.has(room)) return;
+    client.to(room).emit('internal.typing', {
+      senderId: user!.userId,
+      isTyping: !!data.isTyping,
+    });
   }
 
   // -----------------------------------------------------------------------

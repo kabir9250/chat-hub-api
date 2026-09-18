@@ -17,6 +17,7 @@ import { ConversationsModule } from '../conversations/conversations.module';
 import { PageVisitsModule } from '../page-visits/page-visits.module';
 import { VisitorsModule } from '../visitors/visitors.module';
 import { TriggersModule } from '../triggers/triggers.module';
+import { InternalConversationsModule } from '../internal-conversations/internal-conversations.module';
 import { PresenceModule } from './presence.module';
 import { RealtimeEventsModule } from './realtime-events.module';
 import { VisitorPresenceModule } from './visitor-presence.module';
@@ -81,6 +82,12 @@ import { IpVisitorIdentityGuardModule } from '../common/rate-limit/ip-visitor-id
     // imports only AuditLogModule/RbacModule/PresenceModule/VisitorsModule,
     // none of which import this module.
     TriggersModule,
+    // SRS Feature 4 (Team Panel) — InternalConversationsService/
+    // TeamRosterService back the new `internal:*` gateway handlers below.
+    // Not a cycle: InternalConversationsModule imports only
+    // MongooseModule/PresenceModule/RbacModule, none of which import this
+    // module.
+    InternalConversationsModule,
   ],
   providers: [RealtimeGateway, WsRateLimiterService],
 })

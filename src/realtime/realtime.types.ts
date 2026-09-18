@@ -76,3 +76,25 @@ export const agentRoom = (userId: string): string => `agent:${userId}`;
  */
 export const visitorRoom = (visitorId: string): string =>
   `visitor:${visitorId}`;
+
+/**
+ * SRS Feature 4 (Team Panel, `internal-conversations` module) — one room per
+ * 1:1 `InternalConversation`, keyed by the SAME sorted-pair id the
+ * collection's own unique index already enforces
+ * (`InternalConversationsService.findOrCreate` always writes
+ * `participantIds` sorted), not the document's Mongo `_id`. Sorting the pair
+ * before building the room name means both participants independently
+ * compute the identical room string from nothing but the two user ids —
+ * `agent:<userId>` (this file's `agentRoom`) already gives each of them a
+ * personal room to receive the "you have a new internal conversation"
+ * nudge; this room is for the conversation's own live traffic (messages,
+ * read receipts) once a window is open, mirroring `conversationRoom` above
+ * for visitor Conversations.
+ */
+export const internalConversationRoom = (
+  userIdA: string,
+  userIdB: string,
+): string => {
+  const [first, second] = [userIdA, userIdB].sort();
+  return `internal-conversation:${first}:${second}`;
+};

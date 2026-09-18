@@ -243,6 +243,52 @@ export type RealtimeDomainEvent =
       status: 'away';
       previousStatus: 'online' | 'away' | 'offline';
       timestamp: string;
+    }
+  | {
+      // SRS Feature 4 — a new InternalMessage was persisted. Deliberately
+      // its own `kind` (not folded into `message.created` above) — an
+      // InternalMessage has no `siteId`/Visitor at all, so it can't be
+      // routed through any of the Site-scoped rooms every other case here
+      // targets; RealtimeGateway instead broadcasts this to
+      // `internalConversationRoom(participantIdA, participantIdB)` AND each
+      // participant's own `agentRoom` (so the recipient's sidebar/unread
+      // badge updates even if they don't have the conversation window open
+      // — mirrors `conversation.created`'s `assignedAgentId` branch).
+      kind: 'internalMessage.created';
+      internalConversationId: string;
+      participantIds: [string, string];
+      message: {
+        id: string;
+        internalConversationId: string;
+        senderId: string;
+        body: string | null;
+        attachments: RealtimeAttachmentPayload[];
+        sentAt: string;
+        deliveredAt: string | null;
+        readAt: string | null;
+      };
+    }
+  | {
+      // SRS Feature 4 — symmetric read-receipt advance (deliveredAt/readAt)
+      // on an existing InternalMessage. Reuses the SAME client event
+      // `internalMessage.created` above already broadcasts (RealtimeGateway
+      // re-emits it under the identical Socket.IO event name, same
+      // "no new event type, client upserts by id" precedent
+      // `message.updated` already established for visitor Conversations)
+      // rather than inventing a second one.
+      kind: 'internalMessage.updated';
+      internalConversationId: string;
+      participantIds: [string, string];
+      message: {
+        id: string;
+        internalConversationId: string;
+        senderId: string;
+        body: string | null;
+        attachments: RealtimeAttachmentPayload[];
+        sentAt: string;
+        deliveredAt: string | null;
+        readAt: string | null;
+      };
     };
 
 /**

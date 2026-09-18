@@ -18,6 +18,14 @@ import { Counter, CounterSchema } from './counter.schema';
 import { PageVisit, PageVisitSchema } from './page-visit.schema';
 import { Shortcut, ShortcutSchema } from './shortcut.schema';
 import { BannedEntry, BannedEntrySchema } from './banned-entry.schema';
+import {
+  InternalConversation,
+  InternalConversationSchema,
+} from './internal-conversation.schema';
+import {
+  InternalMessage,
+  InternalMessageSchema,
+} from './internal-message.schema';
 
 export * from './organization.schema';
 export * from './site.schema';
@@ -37,6 +45,8 @@ export * from './counter.schema';
 export * from './page-visit.schema';
 export * from './shortcut.schema';
 export * from './banned-entry.schema';
+export * from './internal-conversation.schema';
+export * from './internal-message.schema';
 
 /**
  * All Mongoose model definitions for the app, in one place — passed to
@@ -62,4 +72,6 @@ export const ALL_MODEL_DEFINITIONS: ModelDefinition[] = [
   { name: PageVisit.name, schema: PageVisitSchema },
   { name: Shortcut.name, schema: ShortcutSchema },
   { name: BannedEntry.name, schema: BannedEntrySchema },
+  { name: InternalConversation.name, schema: InternalConversationSchema },
+  { name: InternalMessage.name, schema: InternalMessageSchema },
 ];
