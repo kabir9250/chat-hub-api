@@ -337,6 +337,10 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<
     'analytics.view_organization',
     'conversations.view_site',
     'users.view',
+    'visitors.ban',
+    // 'visitors.ban' added this session per explicit user instruction to
+    // give every default Role the Ban Visitor capability (Manager/Agent
+    // previously lacked it; only Owner/Supervisor had it).
     'leads.view',
     'leads.manage',
     // Phase 2 §3.11 — every default Role gets manage_own + view; Manager
@@ -409,6 +413,10 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<
     'conversations.tag',
     'visitors.view',
     'visitors.edit',
+    'visitors.ban',
+    // 'visitors.ban' added this session per explicit user instruction to
+    // give every default Role the Ban Visitor capability (Manager/Agent
+    // previously lacked it; only Owner/Supervisor had it).
     'leads.view',
     'leads.manage',
     // Phase 2 §3.11 — every default Role, Agent through Owner, gets its own

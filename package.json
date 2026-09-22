@@ -22,6 +22,7 @@
     "seed:test": "ts-node -r tsconfig-paths/register --transpile-only src/database/seed-test.ts",
     "migrate:notification-preferences": "ts-node -r tsconfig-paths/register --transpile-only src/database/migrate-notification-preferences.ts",
     "migrate:triggers-to-condition-engine": "ts-node -r tsconfig-paths/register --transpile-only src/database/migrate-triggers-to-condition-engine.ts",
+    "migrate:add-visitors-ban-permission": "ts-node -r tsconfig-paths/register --transpile-only src/database/migrate-add-visitors-ban-permission.ts",
     "geoip:update": "ts-node -r tsconfig-paths/register --transpile-only src/database/update-geoip-db.ts"
   },
   "dependencies": {

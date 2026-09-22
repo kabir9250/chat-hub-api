@@ -1046,6 +1046,7 @@ export class ConversationsService {
       conversationId,
     );
     await this.assertVisible(actor, site._id, conversation);
+    await this.assertCanSend(actor, conversation, 'change the status');
 
     const before = conversation.status;
     conversation.status = status;
@@ -1417,6 +1418,7 @@ export class ConversationsService {
   private async assertCanSend(
     actor: AuthenticatedUser,
     conversation: ConversationDocument,
+    action = 'send a message',
   ): Promise<void> {
     const assignedAgentId = conversation.assignedAgentId?.toString() ?? null;
     if (!assignedAgentId || assignedAgentId === actor.userId) return;
@@ -1426,8 +1428,8 @@ export class ConversationsService {
       .exec();
     throw new ForbiddenException(
       assignee
-        ? `This conversation is already assigned to ${assignee.displayName}. Take over the conversation to send a message.`
-        : 'This conversation is already assigned to another Agent. Take over the conversation to send a message.',
+        ? `This conversation is already assigned to ${assignee.displayName}. Take over the conversation to ${action}.`
+        : `This conversation is already assigned to another Agent. Take over the conversation to ${action}.`,
     );
   }
 
