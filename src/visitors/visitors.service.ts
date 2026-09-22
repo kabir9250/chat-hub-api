@@ -763,6 +763,49 @@ export class VisitorsService {
     return this.findVisitorOnSite(site, visitorId);
   }
 
+  /**
+   * Same scope signal as `assertCanBan` below: an actor with
+   * `conversations.view_site` may edit any Visitor on the Site; an actor
+   * with only `conversations.view_own` may edit a Visitor only if a
+   * Conversation between that Visitor and this Site is currently assigned
+   * to them. Prevents Agent B from changing a Visitor's name/email/phone
+   * while their Conversation is assigned to Agent A.
+   */
+  private async assertCanEdit(
+    actor: AuthenticatedUser,
+    site: SiteDocument,
+    visitor: VisitorDocument,
+  ): Promise<void> {
+    const canViewSite = await this.permissionsService.hasPermission(
+      actor.userId,
+      'conversations.view_site',
+      site._id,
+    );
+    if (canViewSite) return;
+
+    const canViewOwn = await this.permissionsService.hasPermission(
+      actor.userId,
+      'conversations.view_own',
+      site._id,
+    );
+    if (canViewOwn) {
+      const assignedConversation = await this.conversationModel
+        .findOne({
+          siteId: site._id,
+          visitorId: visitor._id,
+          assignedAgentId: new Types.ObjectId(actor.userId),
+        })
+        .select('_id')
+        .lean()
+        .exec();
+      if (assignedConversation) return;
+    }
+
+    throw new ForbiddenException(
+      'You can only edit a Visitor assigned to you.',
+    );
+  }
+
   async update(
     actor: AuthenticatedUser,
     siteId: string,
@@ -771,6 +814,7 @@ export class VisitorsService {
   ): Promise<VisitorDocument> {
     const site = await this.assertSite(actor, siteId);
     const visitor = await this.findVisitorOnSite(site, visitorId);
+    await this.assertCanEdit(actor, site, visitor);
 
     const before = {
       name: visitor.name,
