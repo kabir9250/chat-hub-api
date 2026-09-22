@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { FilterQuery, Model, Types } from 'mongoose';
 
@@ -878,6 +882,52 @@ export class VisitorsService {
    * unbanning has something to look up, it just enforces nothing on the IP
    * side (there's no IP known to enforce).
    */
+  /**
+   * `visitors.ban` alone doesn't distinguish site-wide vs. assigned-to-me
+   * scope (unlike Conversations' `.view_own`/`.view_site` pair — Visitors
+   * has no analogous key, see `findAllCombined`'s doc comment). Rather than
+   * add a new catalog key, this reuses the Conversations scope permissions
+   * as the signal: an actor with `conversations.view_site` may ban any
+   * Visitor on the Site; an actor with only `conversations.view_own` may
+   * ban a Visitor only if a Conversation between that Visitor and this Site
+   * is currently assigned to them. An actor with neither is turned away by
+   * the `visitors.ban` guard before this ever runs.
+   */
+  private async assertCanBan(
+    actor: AuthenticatedUser,
+    site: SiteDocument,
+    visitor: VisitorDocument,
+  ): Promise<void> {
+    const canViewSite = await this.permissionsService.hasPermission(
+      actor.userId,
+      'conversations.view_site',
+      site._id,
+    );
+    if (canViewSite) return;
+
+    const canViewOwn = await this.permissionsService.hasPermission(
+      actor.userId,
+      'conversations.view_own',
+      site._id,
+    );
+    if (canViewOwn) {
+      const assignedConversation = await this.conversationModel
+        .findOne({
+          siteId: site._id,
+          visitorId: visitor._id,
+          assignedAgentId: new Types.ObjectId(actor.userId),
+        })
+        .select('_id')
+        .lean()
+        .exec();
+      if (assignedConversation) return;
+    }
+
+    throw new ForbiddenException(
+      'You can only ban a Visitor assigned to you.',
+    );
+  }
+
   async ban(
     actor: AuthenticatedUser,
     siteId: string,
@@ -887,6 +937,7 @@ export class VisitorsService {
   ): Promise<VisitorDocument> {
     const site = await this.assertSite(actor, siteId);
     const visitor = await this.findVisitorOnSite(site, visitorId);
+    await this.assertCanBan(actor, site, visitor);
 
     visitor.isBanned = true;
     await visitor.save();
@@ -930,6 +981,7 @@ export class VisitorsService {
   ): Promise<VisitorDocument> {
     const site = await this.assertSite(actor, siteId);
     const visitor = await this.findVisitorOnSite(site, visitorId);
+    await this.assertCanBan(actor, site, visitor);
 
     visitor.isBanned = false;
     await visitor.save();
