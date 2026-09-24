@@ -36,7 +36,7 @@ import { IpVisitorIdentityGuardModule } from '../common/rate-limit/ip-visitor-id
       // (this session, task requirement 4) — see
       // VisitorSessionService.findLatestConversationId's doc comment.
       { name: Conversation.name, schema: ConversationSchema },
-      // Direct user feedback fix — closeChatsFromPreviousVisits() needs to
+      // Direct user feedback fix — closeChatsForEndedVisit() needs to
       // tell an Agent's still-unanswered proactive outreach apart from a
       // Conversation the Visitor actually used during the visit that just
       // ended (see that method's own doc comment).
@@ -72,9 +72,11 @@ import { IpVisitorIdentityGuardModule } from '../common/rate-limit/ip-visitor-id
     // submitProfile() are the two REST touchpoints where a new distinct
     // Visitor identity is effectively created/confirmed from an IP.
     IpVisitorIdentityGuardModule,
-    // Session Fix-13 — the multi-tab guard for the visit-boundary chat
-    // close in `init()` (see `closeChatsFromPreviousVisits`'s doc comment).
-    // Leaf module, same singleton RealtimeModule already resolves.
+    // Session Fix-13, then the grace-timer redesign this session — the
+    // visit-boundary chat close no longer runs from `init()` at all; this
+    // service registers an `onVisitEnded` handler with
+    // `VisitorPresenceService` instead (see `closeChatsForEndedVisit`'s doc
+    // comment). Leaf module, same singleton RealtimeModule already resolves.
     VisitorPresenceModule,
   ],
   controllers: [VisitorSessionController],

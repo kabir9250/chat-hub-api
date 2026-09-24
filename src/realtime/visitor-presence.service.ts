@@ -70,6 +70,76 @@ export class VisitorPresenceService {
   // `forceExpire`) so the NEXT reconnect gets a fresh "online since now."
   private readonly connectedAt = new Map<string, number>();
 
+  /**
+   * Visit-end grace timer (direct user feedback — "agent still typing into
+   * the previous visit's chat after the visitor comes back"). A raw
+   * zero-connections transition is deliberately NOT treated as "the visit is
+   * over" — see `VisitorSessionService.closeChatsForEndedVisit`'s own
+   * doc comment on why a bare disconnect isn't proof (flaky connection,
+   * laptop lid, a frozen background tab all disconnect too, then reconnect
+   * moments later on their own). One timer per Visitor: started on the
+   * transition to zero connections, cancelled by the next `addConnection`
+   * for that same Visitor (ordinary reconnect, or a genuine second tab —
+   * either way the visit is still live), and only actually reported to
+   * `visitEndedHandlers` if it fires uninterrupted. This replaces the old
+   * approach of guessing at `init()` time (`isConnected` + a 1.5s recheck)
+   * with an authoritative fact the presence layer itself now owns.
+   */
+  private readonly visitEndTimers = new Map<string, NodeJS.Timeout>();
+
+  /** How long a Visitor may have zero live sockets before the visit is
+   * considered actually over. Comfortably longer than the gateway's own
+   * `pingInterval`+`pingTimeout` (10s+5s) plus reconnect jitter, so an
+   * ordinary blip never fires this — see this field's use in
+   * `removeConnection`/`forceExpire`. */
+  static readonly VISIT_END_GRACE_MS = 20_000;
+
+  /** Registered by `VisitorSessionService` (which already depends on this
+   * service) at construction time — see that class's constructor. Deliberately
+   * a plain callback list, not `RealtimeEventsService`: this is a purely
+   * internal "the visit is actually over" fact with exactly one consumer,
+   * not a Socket.IO-bound broadcast, and routing it through the domain-event
+   * bus would need a `kind` no client ever listens for. Keeping
+   * `VisitorPresenceModule` a dependency-free leaf (as it is today) also
+   * avoids introducing a cycle with `VisitorSessionModule`, which already
+   * imports this module. */
+  private readonly visitEndedHandlers: ((
+    visitorId: string,
+    siteId: string,
+  ) => void)[] = [];
+
+  onVisitEnded(handler: (visitorId: string, siteId: string) => void): void {
+    this.visitEndedHandlers.push(handler);
+  }
+
+  private cancelVisitEndTimer(visitorId: string): void {
+    const timer = this.visitEndTimers.get(visitorId);
+    if (timer) {
+      clearTimeout(timer);
+      this.visitEndTimers.delete(visitorId);
+    }
+  }
+
+  private scheduleVisitEndCheck(visitorId: string, siteId: string): void {
+    this.cancelVisitEndTimer(visitorId);
+    const timer = setTimeout(() => {
+      this.visitEndTimers.delete(visitorId);
+      // Only fire if the Visitor is STILL at zero connections — a reconnect
+      // that raced this timer already cancelled it via `addConnection`, but
+      // this re-check costs nothing and guards against any future caller of
+      // this method that doesn't go through that path.
+      if (!this.isConnected(visitorId)) {
+        for (const handler of this.visitEndedHandlers) {
+          handler(visitorId, siteId);
+        }
+      }
+    }, VisitorPresenceService.VISIT_END_GRACE_MS);
+    // Doesn't hold the process open — same posture as every other timer in
+    // this codebase (see the gateway's stale sweep interval).
+    timer.unref?.();
+    this.visitEndTimers.set(visitorId, timer);
+  }
+
   /** Records/refreshes "this Visitor is still really there" — called both
    * on connect (see `addConnection`) and on every `visitor:heartbeat`. */
   touchHeartbeat(visitorId: string): void {
@@ -113,6 +183,17 @@ export class VisitorPresenceService {
     this.foregroundConversation.delete(visitorId);
     this.lastHeartbeatAt.delete(visitorId);
     this.connectedAt.delete(visitorId);
+    // Already well past the ordinary grace window (this is only called by
+    // the 60s-threshold stale sweep, vs. the 20s grace above) — no need to
+    // wait further, and no pending timer to worry about (a stale Visitor by
+    // definition has had no `addConnection` recently enough to have
+    // cancelled one anyway, but clear it defensively).
+    this.cancelVisitEndTimer(visitorId);
+    if (siteId) {
+      for (const handler of this.visitEndedHandlers) {
+        handler(visitorId, siteId);
+      }
+    }
     return siteId ? { siteId } : null;
   }
 
@@ -136,6 +217,11 @@ export class VisitorPresenceService {
     if (wentOnline) {
       this.connectedAt.set(visitorId, Date.now());
     }
+    // Any pending "visit might be over" check from a previous disconnect no
+    // longer applies — a live socket (reconnect, or a genuine second tab)
+    // means the visit is still going. See `scheduleVisitEndCheck`'s doc
+    // comment.
+    this.cancelVisitEndTimer(visitorId);
     return wentOnline;
   }
 
@@ -166,6 +252,10 @@ export class VisitorPresenceService {
       this.foregroundConversation.delete(visitorId);
       this.lastHeartbeatAt.delete(visitorId);
       this.connectedAt.delete(visitorId);
+      // Don't declare the visit over yet — start the grace window instead
+      // (see `scheduleVisitEndCheck`'s doc comment). `siteId` is read above
+      // before `siteByVisitor` is cleared.
+      if (siteId) this.scheduleVisitEndCheck(visitorId, siteId);
     }
     return siteId ? { siteId, wentOffline } : null;
   }

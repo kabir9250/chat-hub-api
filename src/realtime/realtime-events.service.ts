@@ -77,6 +77,16 @@ export type RealtimeDomainEvent =
        * assigning it) to a Conversation that WAS created via that queue
        * (`Conversation.deptQueueVisible`). */
       departmentQueueMemberIds?: string[];
+      /**
+       * Visit-end race fix (this session) — only populated by
+       * `VisitorSessionService.closeChatsForEndedVisit` so far, where the
+       * affected Visitor is already cheaply in hand. Lets
+       * `VisitorsPanel.tsx`'s live Visitors list match this update to its
+       * row and clear `activeConversationId` the instant the visit-boundary
+       * close happens, instead of waiting on a debounced REST refetch
+       * triggered by some other event.
+       */
+      visitorId?: string;
     }
   | {
       kind: 'message.created';

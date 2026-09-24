@@ -124,7 +124,21 @@ export class VisitorSessionService {
     private readonly visitorPresence: VisitorPresenceService,
     private readonly analyticsEvents: AnalyticsEventsService,
     private readonly ipVisitorIdentityGuard: IpVisitorIdentityGuardService,
-  ) {}
+  ) {
+    // See `closeChatsForEndedVisit`'s doc comment — the visit-boundary
+    // chat close is now driven by `VisitorPresenceService` itself deciding
+    // "this Visitor has genuinely been gone long enough," not by guessing at
+    // `init()` time. `VisitorPresenceService` stays a dependency-free leaf
+    // module (this service already depends on it, so registering here adds
+    // no new module edge) — see `onVisitEnded`'s own doc comment.
+    this.visitorPresence.onVisitEnded((visitorId, siteId) => {
+      void this.closeChatsForEndedVisit(visitorId, siteId).catch((err) => {
+        this.logger.warn(
+          `Failed to close previous visit's chats: ${(err as Error).message}`,
+        );
+      });
+    });
+  }
 
   /**
    * FR-WID-05: the widget's pre-chat form. Visitor-facing (VisitorAuthGuard
@@ -346,37 +360,16 @@ export class VisitorSessionService {
       Object.assign(visitor, attributionFields);
       await visitor.save();
 
-      // Session Fix-13 (direct user feedback: "the chat session is not
-      // getting over") — a chat belongs to the VISIT it happened in. The
-      // previous visit ended when the Visitor closed their tab, so any
-      // Conversation still left `open`/`pending` from it is over too: close
-      // it here, at the exact boundary `pastVisitsCount` above already
-      // treats as "a genuinely new visit". Without this, the widget's
-      // `localStorage`-persisted conversationId meant one Conversation was
-      // reused forever, so "Past chats" could never be anything but 0 and
-      // every visit's messages piled into one endless transcript.
-      if (startsNewVisit) {
-        // Deliberately NOT awaited (direct user feedback — "the visitor
-        // takes longer than expected to show up in the table"). This call
-        // waits out a grace delay to tell a stale disconnecting socket apart
-        // from a genuine second tab, and awaiting it held up the rest of
-        // `init()` — including the `visitor.incoming` broadcast below and,
-        // because the widget only opens its socket once `init()` RESOLVES,
-        // the `visitor.online` broadcast too. A returning visitor therefore
-        // took that delay longer to appear in the Agent Console than a
-        // brand-new one did.
-        //
-        // Nothing below depends on its result: it only closes Conversations
-        // from the visit that already ended, and broadcasts
-        // `conversation.updated` itself when it does. Errors are logged
-        // rather than surfaced — a failure here must not break session init
-        // (same posture as the PageVisit write below).
-        void this.closeChatsFromPreviousVisits(visitor, site).catch((err) => {
-          this.logger.warn(
-            `Failed to close previous visits' chats: ${(err as Error).message}`,
-          );
-        });
-      }
+      // Session Fix-13 / grace-timer redesign (direct user feedback: "the
+      // chat session is not getting over", then later "the agent is still
+      // in the previous session but the visitor is in a new one") — closing
+      // a stale Conversation used to happen HERE, guessing from
+      // `startsNewVisit` whether the old tab's socket had really gone for
+      // good. It now happens entirely from `VisitorPresenceService`'s own
+      // grace-timer expiry (registered in this class's constructor) — see
+      // `closeChatsForEndedVisit`'s doc comment for the full reasoning. This
+      // branch no longer does anything chat-related; `startsNewVisit` above
+      // still only drives the `pastVisitsCount` analytics bump.
     } else {
       visitor = await this.visitorModel.create({
         _id: pendingNewVisitorId,
@@ -507,31 +500,39 @@ export class VisitorSessionService {
   }
 
   /**
-   * Session Fix-13 — ends the Visitor's still-live Conversations at a visit
-   * boundary (called only when `PageVisitsService.isNewVisit()` says this
-   * `init()` starts a genuinely new visit — a new browser tab, or a >30min
-   * gap for a client that sends no `visitSessionId`).
+   * Grace-timer redesign (direct user feedback — "the agent is still in the
+   * previous session but the visitor is now in a new one"; originally
+   * Session Fix-13) — ends the Visitor's still-live Conversations once their
+   * visit is authoritatively over. Called exactly once per real visit-end,
+   * from `VisitorPresenceService.onVisitEnded` (registered in this class's
+   * constructor) — never from `init()` any more.
    *
-   * **Why `init()` and not the socket disconnect.** A disconnect is not
-   * proof a visit ended — it also fires on a flaky connection, a laptop
-   * lid, or a background tab being frozen, and closing a live chat on any
-   * of those would be wrong. The next `init()` carrying a NEW
-   * `visitSessionId` is the first unambiguous evidence that the tab the old
-   * chat lived in is gone, which is exactly the signal the user described
-   * ("visitor closes the tab and comes back 1-2 minutes later").
+   * **Why presence-driven, not `init()`-driven.** A disconnect alone is not
+   * proof a visit ended — it also fires on a flaky connection, a laptop lid,
+   * or a background tab being frozen, and closing a live chat on any of
+   * those would be wrong. `VisitorPresenceService` already encodes exactly
+   * this distinction: it only calls back here after the Visitor has had
+   * *zero* live sockets for a full grace window (`VISIT_END_GRACE_MS`) with
+   * no reconnect — see its own doc comment. That is the same "no live
+   * connection this visitor could still be using" boundary Session Fix-13
+   * (`isConnected` + a 1.5s guess-and-recheck) was always trying to prove,
+   * just decided authoritatively by the one service that actually tracks
+   * every socket, instead of guessed at from a REST handler racing the
+   * widget's own reconnect.
    *
-   * **Multi-tab guard.** A Visitor opening a SECOND tab while the first is
-   * still chatting also produces a new `visitSessionId`, and must not kill
-   * the live chat in tab one. The widget connects its socket only AFTER
-   * `init()` resolves, so at this exact moment "already connected" can only
-   * mean some OTHER tab of theirs is open — so we skip the close entirely
-   * and leave the existing Conversation to be resumed. (`init()` is also
-   * the one place where that check is unambiguous, another reason it lives
-   * here rather than on disconnect.)
+   * **Multi-tab is no longer a special case here.** Per product decision,
+   * multiple tabs of the same Visitor share one visit/conversation now —
+   * `VisitorPresenceService.addConnection` cancels the grace timer the
+   * moment ANY socket for this Visitor reconnects, tab-identity-agnostic.
+   * So by the time this method runs, it is simply true that the Visitor has
+   * no live connection anywhere, full stop — no guard needed to protect a
+   * second tab, because a live second tab would have cancelled the timer
+   * before it ever fired.
    *
    * Emits the same `conversation.updated` event `ConversationsService
-   * .updateStatus` does, so an Agent Console watching the Visitor sees the
-   * chat leave "Currently served" live, and audits as `system` (no human
+   * .updateStatus` does (now also carrying `visitorId`, so the Agent
+   * Console's live Visitors list can match the update to a row without a
+   * refetch — see `VisitorsPanel.tsx`), and audits as `system` (no human
    * actor closed it).
    *
    * **Unanswered proactive-outreach guard** (direct user feedback — an
@@ -548,50 +549,35 @@ export class VisitorSessionService {
    * instead — a Conversation the Visitor DID engage with during the ended
    * visit still closes exactly as before.
    */
-  private async closeChatsFromPreviousVisits(
-    visitor: VisitorDocument,
-    site: SiteDocument,
+  private async closeChatsForEndedVisit(
+    visitorId: string,
+    siteId: string,
   ): Promise<void> {
-    // Race fix (direct user feedback — "agent sees the previous chat as
-    // Current, not Past," reproduced on the live deployment): this method
-    // only ever runs from `init()`, which — per the widget's own boot order
-    // (`boot()`'s REST call always completes before the socket effect even
-    // creates THIS tab's own socket, see WidgetApp.tsx) — means a `true`
-    // here can never be the new tab's own connection; it can only be an
-    // older one. The multi-tab guard's intent is "don't close a chat a
-    // SECOND, still-open tab is using," but a single instantaneous read
-    // can't tell that apart from "the closed tab's own socket hasn't
-    // finished disconnecting yet" (`pagehide` sends a real close frame
-    // synchronously, but the server processing it is not instant) — and on
-    // a live deployment, that window was wide enough to reproduce the bug
-    // for real (confirmed via direct DB inspection: a conversation the
-    // Visitor had already left stayed `open`/reused across a fresh tab).
-    // A short re-check closes that window: a genuinely dying connection
-    // will have finished disconnecting well within this delay; a real
-    // second tab is still there either way. Deliberately NOT solved by
-    // `VisitorPresenceService.isForeground` — that only reflects the
-    // widget bubble being expanded, `false` for the ordinary "second tab
-    // open, chat bubble minimized" case, so using it here would wrongly
-    // close a live second tab's conversation.
-    if (this.visitorPresence.isConnected(visitor._id.toString())) {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      if (this.visitorPresence.isConnected(visitor._id.toString())) return;
-    }
+    // Defensive re-check: if a new connection raced in between the timer
+    // firing and this async method running, bail out rather than close a
+    // chat the Visitor is actively back in. `VisitorPresenceService` already
+    // guards this the same way before invoking the handler; this costs
+    // nothing and protects against any future second caller.
+    if (this.visitorPresence.isConnected(visitorId)) return;
 
-    // Start of the visit that is ENDING (this runs before the new visit's
-    // own PageVisit is recorded) — the boundary the unanswered-outreach
-    // carve-out below is measured against. `null` (no prior PageVisit, or
-    // one predating visitSessionId tracking) uses the epoch, so every
-    // unanswered outreach reads as "from an older visit" and gets closed
-    // rather than lingering — the safe direction; see the loop's comment.
+    const visitorObjectId = new Types.ObjectId(visitorId);
+    const siteObjectId = new Types.ObjectId(siteId);
+
+    // Start of the visit that just ENDED — the boundary the unanswered-
+    // outreach carve-out below is measured against. `null` (no prior
+    // PageVisit, or one predating visitSessionId tracking) uses the epoch,
+    // so every unanswered outreach reads as "from an older visit" and gets
+    // closed rather than lingering — the safe direction; see the loop's
+    // comment.
     const visitStartedAt =
-      (await this.pageVisitsService.getCurrentVisitStartedAt(visitor._id)) ??
-      new Date(0);
+      (await this.pageVisitsService.getCurrentVisitStartedAt(
+        visitorObjectId,
+      )) ?? new Date(0);
 
     const stale = await this.conversationModel
       .find({
-        visitorId: visitor._id,
-        siteId: site._id,
+        visitorId: visitorObjectId,
+        siteId: siteObjectId,
         status: { $ne: 'closed' },
       })
       .exec();
@@ -630,7 +616,7 @@ export class VisitorSessionService {
       await this.auditLogService.record({
         actorType: 'system',
         action: 'conversation.closed_on_visit_end',
-        siteId: site._id,
+        siteId: siteObjectId,
         targetType: 'Conversation',
         targetId: conversation._id,
         metadata: { before, after: 'closed', reason: 'visitor_visit_ended' },
@@ -638,9 +624,14 @@ export class VisitorSessionService {
 
       this.realtimeEvents.emit({
         kind: 'conversation.updated',
-        siteId: site._id.toString(),
+        siteId,
         conversationId: conversation._id.toString(),
         changeType: 'status',
+        // `visitorId` lets `VisitorsPanel.tsx` match this update to its
+        // live-Visitors row and clear `activeConversationId` without a
+        // refetch — see that event kind's own doc comment
+        // (realtime-events.service.ts).
+        visitorId,
         data: { before, after: 'closed' },
       });
     }

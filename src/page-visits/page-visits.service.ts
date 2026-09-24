@@ -275,7 +275,7 @@ export class PageVisitsService {
 
   /**
    * Zombie-outreach fix — when did the visit that is now ENDING begin?
-   * Called from `VisitorSessionService.closeChatsFromPreviousVisits`, which
+   * Called from `VisitorSessionService.closeChatsForEndedVisit`, which
    * runs before this visit's own first PageVisit is recorded, so the latest
    * record still belongs to the previous visit. Returns the `enteredAt` of
    * the earliest PageVisit sharing that record's `visitSessionId` — i.e. the
