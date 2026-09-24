@@ -64,6 +64,7 @@ export class WidgetConfigService {
       primaryColor: config.primaryColor,
       launcherStyle: config.launcherStyle,
       launcherBadge: { ...config.launcherBadge },
+      launcherBox: { ...config.launcherBox },
       messageStyle: config.messageStyle,
       notificationSoundEnabled: config.notificationSoundEnabled,
       satisfactionRatingsEnabled: config.satisfactionRatingsEnabled,
@@ -103,6 +104,21 @@ export class WidgetConfigService {
         config.launcherBadge.topTextColor = b.topTextColor;
       if (b.bottomTextColor !== undefined)
         config.launcherBadge.bottomTextColor = b.bottomTextColor;
+    }
+    if (dto.launcherBox !== undefined) {
+      const b = dto.launcherBox;
+      if (b.topText !== undefined) config.launcherBox.topText = b.topText.trim();
+      if (b.bottomText !== undefined)
+        config.launcherBox.bottomText = b.bottomText.trim();
+      if (b.bodyColor !== undefined) config.launcherBox.bodyColor = b.bodyColor;
+      if (b.edgeColor !== undefined) config.launcherBox.edgeColor = b.edgeColor;
+      if (b.bubbleColor !== undefined)
+        config.launcherBox.bubbleColor = b.bubbleColor;
+      if (b.dotsColor !== undefined) config.launcherBox.dotsColor = b.dotsColor;
+      if (b.topTextColor !== undefined)
+        config.launcherBox.topTextColor = b.topTextColor;
+      if (b.bottomTextColor !== undefined)
+        config.launcherBox.bottomTextColor = b.bottomTextColor;
     }
     if (dto.messageStyle !== undefined)
       config.messageStyle = dto.messageStyle.trim();
@@ -165,6 +181,7 @@ export class WidgetConfigService {
           primaryColor: config.primaryColor,
           launcherStyle: config.launcherStyle,
           launcherBadge: { ...config.launcherBadge },
+          launcherBox: { ...config.launcherBox },
           messageStyle: config.messageStyle,
           notificationSoundEnabled: config.notificationSoundEnabled,
           satisfactionRatingsEnabled: config.satisfactionRatingsEnabled,

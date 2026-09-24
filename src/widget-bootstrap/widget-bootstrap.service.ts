@@ -16,6 +16,7 @@ import {
   WidgetConfig,
   WidgetConfigDocument,
   WidgetLauncherBadge,
+  WidgetLauncherBox,
   defaultOfflineFormFields,
   defaultPreChatFormFields,
 } from '../database/schemas';
@@ -38,6 +39,7 @@ export interface PublicWidgetConfig {
   primaryColor: string;
   launcherStyle: string;
   launcherBadge: WidgetLauncherBadge;
+  launcherBox: WidgetLauncherBox;
   messageStyle: string;
   notificationSoundEnabled: boolean;
   satisfactionRatingsEnabled: boolean;
@@ -59,6 +61,20 @@ function defaultLauncherBadge(): WidgetLauncherBadge {
     backgroundColor: '#0a0a0a',
     topTextColor: '#f01e3c',
     bottomTextColor: '#ffffff',
+  };
+}
+
+/** Schema-default `WidgetLauncherBox` values — same no-config fallback. */
+function defaultLauncherBox(): WidgetLauncherBox {
+  return {
+    topText: 'LIVE',
+    bottomText: 'CHAT',
+    bodyColor: '#24c5da',
+    edgeColor: '#2ad0dd',
+    bubbleColor: '#ffffff',
+    dotsColor: '#0a0a0a',
+    topTextColor: '#ffffff',
+    bottomTextColor: '#242424',
   };
 }
 
@@ -244,6 +260,7 @@ export class WidgetBootstrapService {
         primaryColor: '#1E88E5',
         launcherStyle: 'round',
         launcherBadge: defaultLauncherBadge(),
+        launcherBox: defaultLauncherBox(),
         messageStyle: 'modern',
         notificationSoundEnabled: true,
         satisfactionRatingsEnabled: true,
@@ -265,6 +282,7 @@ export class WidgetBootstrapService {
       primaryColor: config.primaryColor,
       launcherStyle: config.launcherStyle,
       launcherBadge: config.launcherBadge,
+      launcherBox: config.launcherBox,
       messageStyle: config.messageStyle,
       notificationSoundEnabled: config.notificationSoundEnabled,
       satisfactionRatingsEnabled: config.satisfactionRatingsEnabled,

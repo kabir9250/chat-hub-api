@@ -87,6 +87,55 @@ export class UpdateWidgetLauncherBadgeDto {
 }
 
 /**
+ * Box launcher's editable sub-fields (`widget-config.schema.ts`'s
+ * `WidgetLauncherBox`). Partial-update; accepted regardless of the current
+ * `launcherStyle`, same as `UpdateWidgetLauncherBadgeDto`.
+ */
+export class UpdateWidgetLauncherBoxDto {
+  @ApiPropertyOptional({ example: 'LIVE' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(12)
+  topText?: string;
+
+  @ApiPropertyOptional({ example: 'CHAT' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(12)
+  bottomText?: string;
+
+  @ApiPropertyOptional({ example: '#24c5da' })
+  @IsOptional()
+  @IsHexColor()
+  bodyColor?: string;
+
+  @ApiPropertyOptional({ example: '#2ad0dd' })
+  @IsOptional()
+  @IsHexColor()
+  edgeColor?: string;
+
+  @ApiPropertyOptional({ example: '#ffffff' })
+  @IsOptional()
+  @IsHexColor()
+  bubbleColor?: string;
+
+  @ApiPropertyOptional({ example: '#0a0a0a' })
+  @IsOptional()
+  @IsHexColor()
+  dotsColor?: string;
+
+  @ApiPropertyOptional({ example: '#ffffff' })
+  @IsOptional()
+  @IsHexColor()
+  topTextColor?: string;
+
+  @ApiPropertyOptional({ example: '#242424' })
+  @IsOptional()
+  @IsHexColor()
+  bottomTextColor?: string;
+}
+
+/**
  * One field on either the pre-chat or offline form (Forms builder, this
  * session's addition). The whole array is replaced wholesale on save (not
  * a per-field patch) — same "send the full list back" contract the admin
@@ -168,6 +217,12 @@ export class UpdateWidgetConfigDto {
   @ValidateNested()
   @Type(() => UpdateWidgetLauncherBadgeDto)
   launcherBadge?: UpdateWidgetLauncherBadgeDto;
+
+  @ApiPropertyOptional({ type: UpdateWidgetLauncherBoxDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => UpdateWidgetLauncherBoxDto)
+  launcherBox?: UpdateWidgetLauncherBoxDto;
 
   @ApiPropertyOptional({ example: 'modern' })
   @IsOptional()

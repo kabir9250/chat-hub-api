@@ -16,7 +16,7 @@ export class WidgetConcierge {
 export const WidgetConciergeSchema =
   SchemaFactory.createForClass(WidgetConcierge);
 
-export const LAUNCHER_STYLES = ['round', 'badge'] as const;
+export const LAUNCHER_STYLES = ['round', 'badge', 'box'] as const;
 export type LauncherStyle = (typeof LAUNCHER_STYLES)[number];
 
 /**
@@ -50,6 +50,47 @@ export class WidgetLauncherBadge {
 }
 export const WidgetLauncherBadgeSchema =
   SchemaFactory.createForClass(WidgetLauncherBadge);
+
+/**
+ * "LIVE / CHAT" box launcher (`launcherStyle: 'box'`) — a rounded box with a
+ * typing-dots speech bubble rising from its top, rendered by
+ * `LauncherBoxIcon` (chat-hub-web) from a fixed client-supplied SVG shape.
+ * Kept separate from `WidgetLauncherBadge` so each style remembers its own
+ * words/colors when an admin switches between them. Every painted part of
+ * the shape has its own color.
+ */
+@Schema({ _id: false })
+export class WidgetLauncherBox {
+  @Prop({ default: 'LIVE' })
+  topText!: string;
+
+  @Prop({ default: 'CHAT' })
+  bottomText!: string;
+
+  /** The box body and the speech bubble's outline. */
+  @Prop({ default: '#24c5da' })
+  bodyColor!: string;
+
+  /** Thin shading band along the box's bottom-right inner edge. */
+  @Prop({ default: '#2ad0dd' })
+  edgeColor!: string;
+
+  /** Inside of the speech bubble (behind the dots). */
+  @Prop({ default: '#ffffff' })
+  bubbleColor!: string;
+
+  /** The three typing dots inside the bubble. */
+  @Prop({ default: '#0a0a0a' })
+  dotsColor!: string;
+
+  @Prop({ default: '#ffffff' })
+  topTextColor!: string;
+
+  @Prop({ default: '#242424' })
+  bottomTextColor!: string;
+}
+export const WidgetLauncherBoxSchema =
+  SchemaFactory.createForClass(WidgetLauncherBox);
 
 export const FORM_FIELD_TYPES = [
   'text',
@@ -197,6 +238,9 @@ export class WidgetConfig {
 
   @Prop({ type: WidgetLauncherBadgeSchema, default: () => ({}) })
   launcherBadge!: WidgetLauncherBadge;
+
+  @Prop({ type: WidgetLauncherBoxSchema, default: () => ({}) })
+  launcherBox!: WidgetLauncherBox;
 
   @Prop({ default: 'modern' })
   messageStyle!: string;
