@@ -52,6 +52,25 @@ export interface VisitorSessionResult {
   isReturningVisitor: boolean;
   pastVisitsCount: number;
   pastChatsCount: number;
+  /**
+   * Direct user feedback — "if the visitor returns within [the grace
+   * window], the conversation should continue from where it was left."
+   * Server-authoritative resume signal: the visitor's most recent
+   * still-open Conversation, if one exists, regardless of whether THIS
+   * browser tab has any memory of it at all (a closed-then-reopened tab has
+   * none — see widget/storage.ts's per-tab `visitSessionId`).
+   *
+   * Deliberately keyed off "does an open Conversation still exist" rather
+   * than a separate client-side timer of our own: `VisitorPresenceService`'s
+   * grace window (see `closeChatsForEndedVisit`) is the ONE place that
+   * decides when a visit is truly over, and this just asks the same
+   * question its close already answers — a Conversation still open here is
+   * still open for exactly as long as that grace window says it is, with no
+   * second timer to keep in sync. `null` when there is no open Conversation
+   * (never chatted yet, or the prior one already closed) — the widget then
+   * shows the pre-chat form exactly as it does today.
+   */
+  resumableConversationId: string | null;
 }
 
 export interface InitVisitorSessionInput {
@@ -489,6 +508,17 @@ export class VisitorSessionService {
       },
     });
 
+    // Direct user feedback — "if the visitor returns within [the grace
+    // window], continue from where it was left." Looked up fresh on every
+    // init(), including a brand-new Visitor's very first one (always `null`
+    // there — nothing to find). See `VisitorSessionResult.resumableConversationId`'s
+    // own doc comment for why this asks `closeChatsForEndedVisit`'s own
+    // question rather than tracking a second timer.
+    const resumableConversationId = await this.findOpenConversationId(
+      visitor._id,
+      site._id,
+    );
+
     return {
       token,
       visitorId: visitor._id.toString(),
@@ -496,6 +526,7 @@ export class VisitorSessionService {
       isReturningVisitor,
       pastVisitsCount: visitor.pastVisitsCount,
       pastChatsCount: visitor.pastChatsCount,
+      resumableConversationId,
     };
   }
 
@@ -702,6 +733,28 @@ export class VisitorSessionService {
   ): Promise<string | null> {
     const conversation = await this.conversationModel
       .findOne({ visitorId })
+      .sort({ startedAt: -1 })
+      .select('_id')
+      .lean()
+      .exec();
+    return conversation ? conversation._id.toString() : null;
+  }
+
+  /**
+   * `init()`'s resume signal (`VisitorSessionResult.resumableConversationId`)
+   * — unlike `findLatestConversationId` above, ONLY a still-open Conversation
+   * counts: a closed one (whether closed by `closeChatsForEndedVisit`, an
+   * Agent resolving it, or a rating being submitted) must never be silently
+   * reopened just because it happens to be the most recent one. A Visitor
+   * who genuinely starts a new chat after their old one closed gets a fresh
+   * pre-chat form, exactly as today.
+   */
+  private async findOpenConversationId(
+    visitorId: Types.ObjectId,
+    siteId: Types.ObjectId,
+  ): Promise<string | null> {
+    const conversation = await this.conversationModel
+      .findOne({ visitorId, siteId, status: { $ne: 'closed' } })
       .sort({ startedAt: -1 })
       .select('_id')
       .lean()
