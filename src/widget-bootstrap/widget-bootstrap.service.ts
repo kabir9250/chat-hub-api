@@ -95,7 +95,7 @@ function defaultLauncherFace(): WidgetLauncherFace {
     cardColor: '#0a0a0a',
     cardFillColor: '#24c5da',
     bubbleColor: '#0a0a0a',
-    eyeColor: '#24c5da',
+    eyeColor: '#ffffff',
     topTextColor: '#ffffff',
     bottomTextColor: '#0a0a0a',
     iconSize: 80,
