@@ -11,7 +11,9 @@ import {
   IsString,
   IsUrl,
   Matches,
+  Max,
   MaxLength,
+  Min,
   ValidateNested,
 } from 'class-validator';
 
@@ -84,6 +86,13 @@ export class UpdateWidgetLauncherBadgeDto {
   @IsOptional()
   @IsHexColor()
   bottomTextColor?: string;
+
+  @ApiPropertyOptional({ example: 64, minimum: 32, maximum: 160 })
+  @IsOptional()
+  @IsInt()
+  @Min(32)
+  @Max(160)
+  iconSize?: number;
 }
 
 /**
@@ -133,6 +142,176 @@ export class UpdateWidgetLauncherBoxDto {
   @IsOptional()
   @IsHexColor()
   bottomTextColor?: string;
+
+  @ApiPropertyOptional({ example: 64, minimum: 32, maximum: 160 })
+  @IsOptional()
+  @IsInt()
+  @Min(32)
+  @Max(160)
+  iconSize?: number;
+}
+
+/**
+ * Face launcher's editable sub-fields (`widget-config.schema.ts`'s
+ * `WidgetLauncherFace`). Partial-update; accepted regardless of the current
+ * `launcherStyle`, same as `UpdateWidgetLauncherBadgeDto`.
+ */
+export class UpdateWidgetLauncherFaceDto {
+  @ApiPropertyOptional({ example: 'LIVE' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(12)
+  topText?: string;
+
+  @ApiPropertyOptional({ example: 'CHAT' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(12)
+  bottomText?: string;
+
+  @ApiPropertyOptional({ example: '#0a0a0a' })
+  @IsOptional()
+  @IsHexColor()
+  cardColor?: string;
+
+  @ApiPropertyOptional({ example: '#24c5da' })
+  @IsOptional()
+  @IsHexColor()
+  cardFillColor?: string;
+
+  @ApiPropertyOptional({ example: '#0a0a0a' })
+  @IsOptional()
+  @IsHexColor()
+  bubbleColor?: string;
+
+  @ApiPropertyOptional({ example: '#24c5da' })
+  @IsOptional()
+  @IsHexColor()
+  eyeColor?: string;
+
+  @ApiPropertyOptional({ example: '#ffffff' })
+  @IsOptional()
+  @IsHexColor()
+  topTextColor?: string;
+
+  @ApiPropertyOptional({ example: '#0a0a0a' })
+  @IsOptional()
+  @IsHexColor()
+  bottomTextColor?: string;
+
+  @ApiPropertyOptional({ example: 64, minimum: 32, maximum: 160 })
+  @IsOptional()
+  @IsInt()
+  @Min(32)
+  @Max(160)
+  iconSize?: number;
+}
+
+/**
+ * Chat launcher's editable sub-fields (`widget-config.schema.ts`'s
+ * `WidgetLauncherChat`). Partial-update; accepted regardless of the current
+ * `launcherStyle`, same as `UpdateWidgetLauncherBadgeDto`.
+ */
+export class UpdateWidgetLauncherChatDto {
+  @ApiPropertyOptional({ example: 'LIVE' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(12)
+  topText?: string;
+
+  @ApiPropertyOptional({ example: 'CHAT' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(12)
+  bottomText?: string;
+
+  @ApiPropertyOptional({ example: '#24c5da' })
+  @IsOptional()
+  @IsHexColor()
+  frontBubbleColor?: string;
+
+  @ApiPropertyOptional({ example: '#0a0a0a' })
+  @IsOptional()
+  @IsHexColor()
+  backBubbleColor?: string;
+
+  @ApiPropertyOptional({ example: '#0a0a0a' })
+  @IsOptional()
+  @IsHexColor()
+  dotsColor?: string;
+
+  @ApiPropertyOptional({ example: '#24c5da' })
+  @IsOptional()
+  @IsHexColor()
+  topTextColor?: string;
+
+  @ApiPropertyOptional({ example: '#0a0a0a' })
+  @IsOptional()
+  @IsHexColor()
+  bottomTextColor?: string;
+
+  @ApiPropertyOptional({ example: 64, minimum: 32, maximum: 160 })
+  @IsOptional()
+  @IsInt()
+  @Min(32)
+  @Max(160)
+  iconSize?: number;
+}
+
+/**
+ * Card launcher's editable sub-fields (`widget-config.schema.ts`'s
+ * `WidgetLauncherCard`). Partial-update; accepted regardless of the current
+ * `launcherStyle`, same as `UpdateWidgetLauncherBadgeDto`.
+ */
+export class UpdateWidgetLauncherCardDto {
+  @ApiPropertyOptional({ example: 'LIVE' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(12)
+  topText?: string;
+
+  @ApiPropertyOptional({ example: 'CHAT' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(12)
+  bottomText?: string;
+
+  @ApiPropertyOptional({ example: '#24c5da' })
+  @IsOptional()
+  @IsHexColor()
+  frontBubbleColor?: string;
+
+  @ApiPropertyOptional({ example: '#0a0a0a' })
+  @IsOptional()
+  @IsHexColor()
+  backBubbleColor?: string;
+
+  @ApiPropertyOptional({ example: '#ffffff' })
+  @IsOptional()
+  @IsHexColor()
+  linesColor?: string;
+
+  @ApiPropertyOptional({ example: '#0a0a0a' })
+  @IsOptional()
+  @IsHexColor()
+  cardColor?: string;
+
+  @ApiPropertyOptional({ example: '#24c5da' })
+  @IsOptional()
+  @IsHexColor()
+  topTextColor?: string;
+
+  @ApiPropertyOptional({ example: '#ffffff' })
+  @IsOptional()
+  @IsHexColor()
+  bottomTextColor?: string;
+
+  @ApiPropertyOptional({ example: 64, minimum: 32, maximum: 160 })
+  @IsOptional()
+  @IsInt()
+  @Min(32)
+  @Max(160)
+  iconSize?: number;
 }
 
 /**
@@ -207,6 +386,13 @@ export class UpdateWidgetConfigDto {
   @IsHexColor()
   primaryColor?: string;
 
+  @ApiPropertyOptional({ example: 56, minimum: 32, maximum: 160 })
+  @IsOptional()
+  @IsInt()
+  @Min(32)
+  @Max(160)
+  launcherIconSize?: number;
+
   @ApiPropertyOptional({ example: 'round', enum: LAUNCHER_STYLES })
   @IsOptional()
   @IsIn(LAUNCHER_STYLES)
@@ -223,6 +409,24 @@ export class UpdateWidgetConfigDto {
   @ValidateNested()
   @Type(() => UpdateWidgetLauncherBoxDto)
   launcherBox?: UpdateWidgetLauncherBoxDto;
+
+  @ApiPropertyOptional({ type: UpdateWidgetLauncherFaceDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => UpdateWidgetLauncherFaceDto)
+  launcherFace?: UpdateWidgetLauncherFaceDto;
+
+  @ApiPropertyOptional({ type: UpdateWidgetLauncherChatDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => UpdateWidgetLauncherChatDto)
+  launcherChat?: UpdateWidgetLauncherChatDto;
+
+  @ApiPropertyOptional({ type: UpdateWidgetLauncherCardDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => UpdateWidgetLauncherCardDto)
+  launcherCard?: UpdateWidgetLauncherCardDto;
 
   @ApiPropertyOptional({ example: 'modern' })
   @IsOptional()

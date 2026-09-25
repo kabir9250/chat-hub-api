@@ -17,6 +17,9 @@ import {
   WidgetConfigDocument,
   WidgetLauncherBadge,
   WidgetLauncherBox,
+  WidgetLauncherFace,
+  WidgetLauncherChat,
+  WidgetLauncherCard,
   defaultOfflineFormFields,
   defaultPreChatFormFields,
 } from '../database/schemas';
@@ -37,9 +40,13 @@ export interface PublicWidgetConfig {
   };
   iconUrl?: string;
   primaryColor: string;
+  launcherIconSize: number;
   launcherStyle: string;
   launcherBadge: WidgetLauncherBadge;
   launcherBox: WidgetLauncherBox;
+  launcherFace: WidgetLauncherFace;
+  launcherChat: WidgetLauncherChat;
+  launcherCard: WidgetLauncherCard;
   messageStyle: string;
   notificationSoundEnabled: boolean;
   satisfactionRatingsEnabled: boolean;
@@ -61,6 +68,7 @@ function defaultLauncherBadge(): WidgetLauncherBadge {
     backgroundColor: '#0a0a0a',
     topTextColor: '#f01e3c',
     bottomTextColor: '#ffffff',
+    iconSize: 64,
   };
 }
 
@@ -75,6 +83,51 @@ function defaultLauncherBox(): WidgetLauncherBox {
     dotsColor: '#0a0a0a',
     topTextColor: '#ffffff',
     bottomTextColor: '#242424',
+    iconSize: 80,
+  };
+}
+
+/** Schema-default `WidgetLauncherFace` values — same no-config fallback. */
+function defaultLauncherFace(): WidgetLauncherFace {
+  return {
+    topText: 'LIVE',
+    bottomText: 'CHAT',
+    cardColor: '#0a0a0a',
+    cardFillColor: '#24c5da',
+    bubbleColor: '#0a0a0a',
+    eyeColor: '#24c5da',
+    topTextColor: '#ffffff',
+    bottomTextColor: '#0a0a0a',
+    iconSize: 80,
+  };
+}
+
+/** Schema-default `WidgetLauncherChat` values — same no-config fallback. */
+function defaultLauncherChat(): WidgetLauncherChat {
+  return {
+    topText: 'LIVE',
+    bottomText: 'CHAT',
+    frontBubbleColor: '#24c5da',
+    backBubbleColor: '#0a0a0a',
+    dotsColor: '#0a0a0a',
+    topTextColor: '#24c5da',
+    bottomTextColor: '#0a0a0a',
+    iconSize: 56,
+  };
+}
+
+/** Schema-default `WidgetLauncherCard` values — same no-config fallback. */
+function defaultLauncherCard(): WidgetLauncherCard {
+  return {
+    topText: 'LIVE',
+    bottomText: 'CHAT',
+    frontBubbleColor: '#24c5da',
+    backBubbleColor: '#0a0a0a',
+    linesColor: '#ffffff',
+    cardColor: '#0a0a0a',
+    topTextColor: '#24c5da',
+    bottomTextColor: '#ffffff',
+    iconSize: 64,
   };
 }
 
@@ -258,9 +311,13 @@ export class WidgetBootstrapService {
         topTitle: 'support',
         concierge: { displayName: 'Live Support', byline: 'Ask us anything' },
         primaryColor: '#1E88E5',
+        launcherIconSize: 56,
         launcherStyle: 'round',
         launcherBadge: defaultLauncherBadge(),
         launcherBox: defaultLauncherBox(),
+        launcherFace: defaultLauncherFace(),
+        launcherChat: defaultLauncherChat(),
+        launcherCard: defaultLauncherCard(),
         messageStyle: 'modern',
         notificationSoundEnabled: true,
         satisfactionRatingsEnabled: true,
@@ -283,6 +340,10 @@ export class WidgetBootstrapService {
       launcherStyle: config.launcherStyle,
       launcherBadge: config.launcherBadge,
       launcherBox: config.launcherBox,
+      launcherFace: config.launcherFace,
+      launcherChat: config.launcherChat,
+      launcherCard: config.launcherCard,
+      launcherIconSize: config.launcherIconSize,
       messageStyle: config.messageStyle,
       notificationSoundEnabled: config.notificationSoundEnabled,
       satisfactionRatingsEnabled: config.satisfactionRatingsEnabled,

@@ -62,9 +62,13 @@ export class WidgetConfigService {
       concierge: { ...config.concierge },
       iconUrl: config.iconUrl,
       primaryColor: config.primaryColor,
+      launcherIconSize: config.launcherIconSize,
       launcherStyle: config.launcherStyle,
       launcherBadge: { ...config.launcherBadge },
       launcherBox: { ...config.launcherBox },
+      launcherFace: { ...config.launcherFace },
+      launcherChat: { ...config.launcherChat },
+      launcherCard: { ...config.launcherCard },
       messageStyle: config.messageStyle,
       notificationSoundEnabled: config.notificationSoundEnabled,
       satisfactionRatingsEnabled: config.satisfactionRatingsEnabled,
@@ -88,6 +92,8 @@ export class WidgetConfigService {
     }
     if (dto.iconUrl !== undefined) config.iconUrl = dto.iconUrl;
     if (dto.primaryColor !== undefined) config.primaryColor = dto.primaryColor;
+    if (dto.launcherIconSize !== undefined)
+      config.launcherIconSize = dto.launcherIconSize;
     if (dto.launcherStyle !== undefined)
       config.launcherStyle = dto.launcherStyle;
     if (dto.launcherBadge !== undefined) {
@@ -104,10 +110,12 @@ export class WidgetConfigService {
         config.launcherBadge.topTextColor = b.topTextColor;
       if (b.bottomTextColor !== undefined)
         config.launcherBadge.bottomTextColor = b.bottomTextColor;
+      if (b.iconSize !== undefined) config.launcherBadge.iconSize = b.iconSize;
     }
     if (dto.launcherBox !== undefined) {
       const b = dto.launcherBox;
-      if (b.topText !== undefined) config.launcherBox.topText = b.topText.trim();
+      if (b.topText !== undefined)
+        config.launcherBox.topText = b.topText.trim();
       if (b.bottomText !== undefined)
         config.launcherBox.bottomText = b.bottomText.trim();
       if (b.bodyColor !== undefined) config.launcherBox.bodyColor = b.bodyColor;
@@ -119,6 +127,64 @@ export class WidgetConfigService {
         config.launcherBox.topTextColor = b.topTextColor;
       if (b.bottomTextColor !== undefined)
         config.launcherBox.bottomTextColor = b.bottomTextColor;
+      if (b.iconSize !== undefined) config.launcherBox.iconSize = b.iconSize;
+    }
+    if (dto.launcherFace !== undefined) {
+      const b = dto.launcherFace;
+      if (b.topText !== undefined)
+        config.launcherFace.topText = b.topText.trim();
+      if (b.bottomText !== undefined)
+        config.launcherFace.bottomText = b.bottomText.trim();
+      if (b.cardColor !== undefined)
+        config.launcherFace.cardColor = b.cardColor;
+      if (b.cardFillColor !== undefined)
+        config.launcherFace.cardFillColor = b.cardFillColor;
+      if (b.bubbleColor !== undefined)
+        config.launcherFace.bubbleColor = b.bubbleColor;
+      if (b.eyeColor !== undefined) config.launcherFace.eyeColor = b.eyeColor;
+      if (b.topTextColor !== undefined)
+        config.launcherFace.topTextColor = b.topTextColor;
+      if (b.bottomTextColor !== undefined)
+        config.launcherFace.bottomTextColor = b.bottomTextColor;
+      if (b.iconSize !== undefined) config.launcherFace.iconSize = b.iconSize;
+    }
+    if (dto.launcherChat !== undefined) {
+      const b = dto.launcherChat;
+      if (b.topText !== undefined)
+        config.launcherChat.topText = b.topText.trim();
+      if (b.bottomText !== undefined)
+        config.launcherChat.bottomText = b.bottomText.trim();
+      if (b.frontBubbleColor !== undefined)
+        config.launcherChat.frontBubbleColor = b.frontBubbleColor;
+      if (b.backBubbleColor !== undefined)
+        config.launcherChat.backBubbleColor = b.backBubbleColor;
+      if (b.dotsColor !== undefined)
+        config.launcherChat.dotsColor = b.dotsColor;
+      if (b.topTextColor !== undefined)
+        config.launcherChat.topTextColor = b.topTextColor;
+      if (b.bottomTextColor !== undefined)
+        config.launcherChat.bottomTextColor = b.bottomTextColor;
+      if (b.iconSize !== undefined) config.launcherChat.iconSize = b.iconSize;
+    }
+    if (dto.launcherCard !== undefined) {
+      const b = dto.launcherCard;
+      if (b.topText !== undefined)
+        config.launcherCard.topText = b.topText.trim();
+      if (b.bottomText !== undefined)
+        config.launcherCard.bottomText = b.bottomText.trim();
+      if (b.frontBubbleColor !== undefined)
+        config.launcherCard.frontBubbleColor = b.frontBubbleColor;
+      if (b.backBubbleColor !== undefined)
+        config.launcherCard.backBubbleColor = b.backBubbleColor;
+      if (b.linesColor !== undefined)
+        config.launcherCard.linesColor = b.linesColor;
+      if (b.cardColor !== undefined)
+        config.launcherCard.cardColor = b.cardColor;
+      if (b.topTextColor !== undefined)
+        config.launcherCard.topTextColor = b.topTextColor;
+      if (b.bottomTextColor !== undefined)
+        config.launcherCard.bottomTextColor = b.bottomTextColor;
+      if (b.iconSize !== undefined) config.launcherCard.iconSize = b.iconSize;
     }
     if (dto.messageStyle !== undefined)
       config.messageStyle = dto.messageStyle.trim();
@@ -179,9 +245,13 @@ export class WidgetConfigService {
           concierge: { ...config.concierge },
           iconUrl: config.iconUrl,
           primaryColor: config.primaryColor,
+          launcherIconSize: config.launcherIconSize,
           launcherStyle: config.launcherStyle,
           launcherBadge: { ...config.launcherBadge },
           launcherBox: { ...config.launcherBox },
+          launcherFace: { ...config.launcherFace },
+          launcherChat: { ...config.launcherChat },
+          launcherCard: { ...config.launcherCard },
           messageStyle: config.messageStyle,
           notificationSoundEnabled: config.notificationSoundEnabled,
           satisfactionRatingsEnabled: config.satisfactionRatingsEnabled,

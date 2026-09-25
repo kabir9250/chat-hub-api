@@ -16,7 +16,14 @@ export class WidgetConcierge {
 export const WidgetConciergeSchema =
   SchemaFactory.createForClass(WidgetConcierge);
 
-export const LAUNCHER_STYLES = ['round', 'badge', 'box'] as const;
+export const LAUNCHER_STYLES = [
+  'round',
+  'badge',
+  'box',
+  'face',
+  'chat',
+  'card',
+] as const;
 export type LauncherStyle = (typeof LAUNCHER_STYLES)[number];
 
 /**
@@ -47,6 +54,11 @@ export class WidgetLauncherBadge {
 
   @Prop({ default: '#ffffff' })
   bottomTextColor!: string;
+
+  /** Base icon height in pixels (width follows via the icon's fixed
+   *  aspect ratio). Clamped 32-160 by `UpdateWidgetLauncher*Dto`. */
+  @Prop({ default: 64 })
+  iconSize!: number;
 }
 export const WidgetLauncherBadgeSchema =
   SchemaFactory.createForClass(WidgetLauncherBadge);
@@ -88,9 +100,147 @@ export class WidgetLauncherBox {
 
   @Prop({ default: '#242424' })
   bottomTextColor!: string;
+
+  /** Base icon height in pixels (width follows via the icon's fixed
+   *  aspect ratio). Clamped 32-160 by `UpdateWidgetLauncher*Dto`. */
+  @Prop({ default: 80 })
+  iconSize!: number;
 }
 export const WidgetLauncherBoxSchema =
   SchemaFactory.createForClass(WidgetLauncherBox);
+
+/**
+ * "LIVE / CHAT" face launcher (`launcherStyle: 'face'`) — a round 3-eyed
+ * speech-bubble "face" sitting on top of a wide message card, rendered by
+ * `LauncherFaceIcon` (chat-hub-web) from a fixed client-supplied SVG shape.
+ * Kept separate from the other launcher styles so each remembers its own
+ * words/colors when an admin switches between them.
+ */
+@Schema({ _id: false })
+export class WidgetLauncherFace {
+  @Prop({ default: 'LIVE' })
+  topText!: string;
+
+  @Prop({ default: 'CHAT' })
+  bottomText!: string;
+
+  /** The message card's outline. */
+  @Prop({ default: '#0a0a0a' })
+  cardColor!: string;
+
+  /** The message card's inner fill, behind the text. */
+  @Prop({ default: '#24c5da' })
+  cardFillColor!: string;
+
+  /** The round face bubble sitting above the card. */
+  @Prop({ default: '#0a0a0a' })
+  bubbleColor!: string;
+
+  /** The 3 eye dots, showing through holes in the bubble. */
+  @Prop({ default: '#24c5da' })
+  eyeColor!: string;
+
+  @Prop({ default: '#ffffff' })
+  topTextColor!: string;
+
+  @Prop({ default: '#0a0a0a' })
+  bottomTextColor!: string;
+
+  /** Base icon height in pixels (width follows via the icon's fixed
+   *  aspect ratio). Clamped 32-160 by `UpdateWidgetLauncher*Dto`. */
+  @Prop({ default: 80 })
+  iconSize!: number;
+}
+export const WidgetLauncherFaceSchema =
+  SchemaFactory.createForClass(WidgetLauncherFace);
+
+/**
+ * "LIVE / CHAT" chat launcher (`launcherStyle: 'chat'`) — a two-bubble
+ * speech mascot beside plain "LIVE" / "CHAT" text (no badge/card
+ * background), rendered by `LauncherChatIcon` (chat-hub-web) from a fixed
+ * client-supplied SVG shape. Kept separate from the other launcher styles
+ * so each remembers its own words/colors when an admin switches between
+ * them.
+ */
+@Schema({ _id: false })
+export class WidgetLauncherChat {
+  @Prop({ default: 'LIVE' })
+  topText!: string;
+
+  @Prop({ default: 'CHAT' })
+  bottomText!: string;
+
+  /** The larger, front speech bubble. */
+  @Prop({ default: '#24c5da' })
+  frontBubbleColor!: string;
+
+  /** The smaller bubble overlapping its lower-left corner. */
+  @Prop({ default: '#0a0a0a' })
+  backBubbleColor!: string;
+
+  /** The 3 accent dots on the front bubble's face. */
+  @Prop({ default: '#0a0a0a' })
+  dotsColor!: string;
+
+  @Prop({ default: '#24c5da' })
+  topTextColor!: string;
+
+  @Prop({ default: '#0a0a0a' })
+  bottomTextColor!: string;
+
+  /** Base icon height in pixels (width follows via the icon's fixed
+   *  aspect ratio). Clamped 32-160 by `UpdateWidgetLauncher*Dto`. */
+  @Prop({ default: 56 })
+  iconSize!: number;
+}
+export const WidgetLauncherChatSchema =
+  SchemaFactory.createForClass(WidgetLauncherChat);
+
+/**
+ * "LIVE / CHAT" card launcher (`launcherStyle: 'card'`) — a two-bubble
+ * speech mascot beside a card holding the "LIVE"/"CHAT" text (mirrored
+ * layout of `chat`, with a card like `badge`), rendered by
+ * `LauncherCardIcon` (chat-hub-web) from a fixed client-supplied SVG shape.
+ * Kept separate from the other launcher styles so each remembers its own
+ * words/colors when an admin switches between them.
+ */
+@Schema({ _id: false })
+export class WidgetLauncherCard {
+  @Prop({ default: 'LIVE' })
+  topText!: string;
+
+  @Prop({ default: 'CHAT' })
+  bottomText!: string;
+
+  /** The larger, front speech bubble. */
+  @Prop({ default: '#24c5da' })
+  frontBubbleColor!: string;
+
+  /** The smaller bubble overlapping its lower-right corner. */
+  @Prop({ default: '#0a0a0a' })
+  backBubbleColor!: string;
+
+  /** The 6 chat-line holes cut into the front bubble. */
+  @Prop({ default: '#ffffff' })
+  linesColor!: string;
+
+  /** The text card's background. */
+  @Prop({ default: '#0a0a0a' })
+  cardColor!: string;
+
+  @Prop({ default: '#24c5da' })
+  topTextColor!: string;
+
+  @Prop({ default: '#ffffff' })
+  bottomTextColor!: string;
+
+  /** Base icon height in pixels (width follows via the icon's fixed
+   *  aspect ratio). Clamped 32-160 by `UpdateWidgetLauncher*Dto`. */
+  @Prop({ default: 64 })
+  iconSize!: number;
+}
+export const WidgetLauncherCardSchema =
+  SchemaFactory.createForClass(WidgetLauncherCard);
 
 export const FORM_FIELD_TYPES = [
   'text',
@@ -233,6 +383,11 @@ export class WidgetConfig {
   @Prop({ default: '#1E88E5' })
   primaryColor!: string;
 
+  /** Round launcher bubble's base height in pixels (it's a circle, so this
+   *  is also its width). Clamped 32-160 by `UpdateWidgetConfigDto`. */
+  @Prop({ default: 56 })
+  launcherIconSize!: number;
+
   @Prop({ type: String, default: 'round', enum: LAUNCHER_STYLES })
   launcherStyle!: LauncherStyle;
 
@@ -241,6 +396,15 @@ export class WidgetConfig {
 
   @Prop({ type: WidgetLauncherBoxSchema, default: () => ({}) })
   launcherBox!: WidgetLauncherBox;
+
+  @Prop({ type: WidgetLauncherFaceSchema, default: () => ({}) })
+  launcherFace!: WidgetLauncherFace;
+
+  @Prop({ type: WidgetLauncherChatSchema, default: () => ({}) })
+  launcherChat!: WidgetLauncherChat;
+
+  @Prop({ type: WidgetLauncherCardSchema, default: () => ({}) })
+  launcherCard!: WidgetLauncherCard;
 
   @Prop({ default: 'modern' })
   messageStyle!: string;
