@@ -82,9 +82,16 @@ export class Message {
 
   @Prop({ type: Date, default: null })
   readAt!: Date | null;
+
+  // Internal system line (e.g. "X took over this chat"): shown to
+  // Agents/Admins only. Every Visitor-facing read and broadcast excludes it.
+  @Prop({ type: Boolean, default: false })
+  agentOnly!: boolean;
 }
 
 export type MessageDocument = Message & Document;
 export const MessageSchema = SchemaFactory.createForClass(Message);
 // Primary access pattern: fetch a conversation's transcript in order.
 MessageSchema.index({ conversationId: 1, sentAt: 1 });
+// Advanced History filter — word-based Keywords search over message bodies.
+MessageSchema.index({ body: 'text' });

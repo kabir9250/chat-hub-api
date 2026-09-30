@@ -52,6 +52,12 @@ import { ReferenceNumberService } from './reference-number.service';
 import { CreateConversationDto } from './dto/create-conversation.dto';
 import { ListConversationsQueryDto } from './dto/list-conversations.query.dto';
 import { SubmitRatingDto } from './dto/submit-rating.dto';
+import { DROP_GRACE_MS, computeServedOutcome } from './served-outcome.util';
+import { SERVED_OUTCOMES } from '../database/schemas/conversation.schema';
+import type {
+  DropSide,
+  ServedOutcome,
+} from '../database/schemas/conversation.schema';
 import { GetMessagesSinceQueryDto } from './dto/get-messages-since.query.dto';
 import { CONVERSATION_VIEW_PERMISSIONS } from './conversations.constants';
 import {
@@ -289,6 +295,8 @@ export class ConversationsService {
       // available to auto-route to" branch ever actually goes through
       // FR-RTE-02's whole-Department queue.
       deptQueueVisible: !assignedAgentId,
+      initiatedBy: visitorDoc.wasTriggered ? 'trigger' : 'visitor',
+      servedOutcome: submissionChannel === 'offline' ? 'offline_form' : null,
     });
 
     if (dto.customFields !== undefined) {
@@ -306,6 +314,7 @@ export class ConversationsService {
         body: dto.initialMessage,
         sentAt: new Date(),
       });
+      await this.trackMessage(conversation._id, 'visitor', null);
     }
 
     // FR-VIS-05: increment the Visitor's pastChatsCount — stubbed at 0 since
@@ -634,6 +643,27 @@ export class ConversationsService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
 
+    if (this.usesAdvancedFilters(query)) {
+      const allowed = await this.permissionsService.hasPermission(
+        actor.userId,
+        'history.advanced_filter',
+        site._id,
+      );
+      if (!allowed) {
+        throw new ForbiddenException(
+          'You do not have permission to use the advanced History filter.',
+        );
+      }
+      const ok = await this.applyAdvancedFilters(filter, query, {
+        siteId: site._id,
+      });
+      if (!ok) {
+        return query.search
+          ? { grouped: true, groups: [], total: 0, page, limit }
+          : { items: [], total: 0, page, limit };
+      }
+    }
+
     // Phase 2, FR-P2-GRP-01–03 (this session) — a name/email search groups
     // its results by Visitor rather than returning a flat list; every OTHER
     // filter combination (status/date range/tag/rating/agentId alone, with
@@ -763,6 +793,28 @@ export class ConversationsService {
     const limit = query.limit ?? 20;
     const siteIds = allSiteIds.map((id) => id.toString());
 
+    if (this.usesAdvancedFilters(query)) {
+      const advSites = (
+        await this.permissionsService.getAuthorizedSites(actor.userId, [
+          'history.advanced_filter',
+        ])
+      ).map((s) => new Types.ObjectId(s.siteId));
+      if (advSites.length === 0) {
+        throw new ForbiddenException(
+          'You do not have permission to use the advanced History filter.',
+        );
+      }
+      filter.$and = [...(filter.$and ?? []), { siteId: { $in: advSites } }];
+      const ok = await this.applyAdvancedFilters(filter, query, {
+        siteId: { $in: allSiteIds },
+      });
+      if (!ok) {
+        return query.search
+          ? { grouped: true, groups: [], total: 0, page, limit, siteIds }
+          : { items: [], total: 0, page, limit, siteIds };
+      }
+    }
+
     // Phase 2, FR-P2-GRP-01–03 — identical branch to findAll() above: a
     // name/email search groups by Visitor across every authorized Site;
     // every other filter combination keeps the flat shape unchanged.
@@ -834,6 +886,14 @@ export class ConversationsService {
         conversation,
         'open',
       );
+    }
+
+    // Advanced History filter's "Unread" — any Agent opening the chat clears it.
+    if (conversation.unreadByAgent) {
+      conversation.unreadByAgent = false;
+      await this.conversationModel
+        .updateOne({ _id: conversation._id }, { $set: { unreadByAgent: false } })
+        .exec();
     }
 
     // Captured BEFORE populate() below replaces conversation.visitorId with
@@ -1051,6 +1111,8 @@ export class ConversationsService {
     const before = conversation.status;
     conversation.status = status;
     conversation.closedAt = status === 'closed' ? new Date() : null;
+    if (status === 'closed') this.settleDropOnClose(conversation);
+    conversation.servedOutcome = computeServedOutcome(conversation);
     await conversation.save();
 
     await this.auditLog.record({
@@ -1077,6 +1139,244 @@ export class ConversationsService {
   // ---------------------------------------------------------------------
   // Assign (FR-AGT-06) — conversations.assign.
   // ---------------------------------------------------------------------
+  // ---------------------------------------------------------------------
+  // Advanced History filter bookkeeping — message counters, "Chats served"
+  // outcome and connection-drop tracking. All denormalized onto the
+  // Conversation so the History filter is a plain indexed query.
+  // ---------------------------------------------------------------------
+
+  /** Called after every persisted Visitor/Agent message (system excluded). */
+  private async trackMessage(
+    conversationId: Types.ObjectId,
+    senderType: 'visitor' | 'agent',
+    senderId: Types.ObjectId | null,
+  ): Promise<void> {
+    const update: Record<string, unknown> =
+      senderType === 'visitor'
+        ? {
+            $inc: { messageCount: 1, visitorMsgCount: 1 },
+            $set: { unreadByAgent: true },
+          }
+        : {
+            $inc: { messageCount: 1, agentMsgCount: 1 },
+            $set: { unreadByAgent: false },
+            ...(senderId ? { $addToSet: { participantAgentIds: senderId } } : {}),
+          };
+    const updated = await this.conversationModel
+      .findByIdAndUpdate(conversationId, update, { new: true })
+      .select(
+        'submissionChannel status visitorMsgCount agentMsgCount droppedAt droppedBy servedOutcome',
+      )
+      .lean()
+      .exec();
+    if (!updated) return;
+    const next = computeServedOutcome(updated);
+    if ((updated.servedOutcome ?? null) !== next) {
+      await this.conversationModel
+        .updateOne({ _id: conversationId }, { $set: { servedOutcome: next } })
+        .exec();
+    }
+  }
+
+  /**
+   * Closing a chat: a disconnect older than the grace window becomes a
+   * recorded drop (it stays "dropped" even though the chat is now closed);
+   * a recent one is forgiven — the Agent wrapped up before it counted.
+   */
+  private settleDropOnClose(conversation: ConversationDocument): void {
+    if (conversation.droppedAt || !conversation.disconnectedAt) return;
+    if (Date.now() - conversation.disconnectedAt.getTime() >= DROP_GRACE_MS) {
+      conversation.droppedAt = conversation.disconnectedAt;
+      conversation.droppedBy = conversation.disconnectedSide;
+    }
+    conversation.disconnectedAt = null;
+    conversation.disconnectedSide = null;
+  }
+
+  /** A side's last socket went away — start the drop clock on its open chats. */
+  async markSideDisconnected(side: DropSide, id: string): Promise<void> {
+    await this.conversationModel
+      .updateMany(
+        {
+          ...(side === 'visitor'
+            ? { visitorId: new Types.ObjectId(id) }
+            : { assignedAgentId: new Types.ObjectId(id) }),
+          status: { $in: ['open', 'pending'] },
+          messageCount: { $gt: 0 },
+          droppedAt: null,
+          disconnectedAt: null,
+        },
+        { $set: { disconnectedAt: new Date(), disconnectedSide: side } },
+      )
+      .exec();
+  }
+
+  /** The side reconnected before the grace window ended — cancel the drop. */
+  async clearSideDisconnected(side: DropSide, id: string): Promise<void> {
+    await this.conversationModel
+      .updateMany(
+        {
+          ...(side === 'visitor'
+            ? { visitorId: new Types.ObjectId(id) }
+            : { assignedAgentId: new Types.ObjectId(id) }),
+          disconnectedSide: side,
+          disconnectedAt: { $ne: null },
+          droppedAt: null,
+        },
+        { $set: { disconnectedAt: null, disconnectedSide: null } },
+      )
+      .exec();
+  }
+
+  /** Periodic sweep: disconnects older than the grace window become drops. */
+  async sweepDroppedConversations(): Promise<number> {
+    const cutoff = new Date(Date.now() - DROP_GRACE_MS);
+    const due = await this.conversationModel
+      .find({
+        disconnectedAt: { $lte: cutoff },
+        droppedAt: null,
+        status: { $in: ['open', 'pending'] },
+      })
+      .select(
+        'submissionChannel status visitorMsgCount agentMsgCount disconnectedAt disconnectedSide',
+      )
+      .limit(500)
+      .lean()
+      .exec();
+    for (const c of due) {
+      const outcome = computeServedOutcome({
+        ...c,
+        droppedAt: c.disconnectedAt,
+        droppedBy: c.disconnectedSide,
+      });
+      await this.conversationModel
+        .updateOne(
+          { _id: c._id, droppedAt: null },
+          {
+            $set: {
+              droppedAt: c.disconnectedAt,
+              droppedBy: c.disconnectedSide,
+              disconnectedAt: null,
+              disconnectedSide: null,
+              servedOutcome: outcome,
+            },
+          },
+        )
+        .exec();
+    }
+    return due.length;
+  }
+
+  private usesAdvancedFilters(q: ListConversationsQueryDto): boolean {
+    return !!(
+      q.unread ||
+      q.triggered ||
+      q.keywords ||
+      q.messagesAtLeast ||
+      q.served ||
+      q.satisfaction ||
+      q.tagsAny ||
+      q.initiatedBy ||
+      q.visitorName ||
+      q.visitorEmail ||
+      q.participantAgentId
+    );
+  }
+
+  /**
+   * Advanced History filter → extra `$and` conditions on `filter` (never
+   * overwrites keys the scope/basic filters already set). Returns false when
+   * a lookup-based condition (keywords, visitor name/email) provably matches
+   * nothing, so callers can return an empty page without querying.
+   * Permission (`history.advanced_filter`) is checked by the callers.
+   */
+  private async applyAdvancedFilters(
+    filter: FilterQuery<ConversationDocument>,
+    q: ListConversationsQueryDto,
+    visitorSiteFilter: FilterQuery<VisitorDocument>,
+  ): Promise<boolean> {
+    const and: FilterQuery<ConversationDocument>[] = [];
+
+    if (q.unread) and.push({ unreadByAgent: true });
+    if (q.messagesAtLeast && q.messagesAtLeast > 0) {
+      and.push({ messageCount: { $gte: q.messagesAtLeast } });
+    }
+    if (q.served) {
+      const wanted = q.served
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s): s is ServedOutcome =>
+          (SERVED_OUTCOMES as readonly string[]).includes(s),
+        );
+      if (wanted.length === 0) return false;
+      and.push({ servedOutcome: { $in: wanted } });
+    }
+    if (q.satisfaction === 'good') and.push({ ratingScore: { $gte: 4 } });
+    if (q.satisfaction === 'bad') {
+      and.push({ ratingScore: { $gte: 1, $lte: 2 } });
+    }
+    if (q.tagsAny) {
+      const tags = q.tagsAny
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .slice(0, 20);
+      if (tags.length > 0) {
+        and.push({
+          tags: {
+            $in: tags.map((t) => new RegExp(`^${this.escapeRegex(t)}$`, 'i')),
+          },
+        });
+      }
+    }
+    if (q.triggered || q.initiatedBy === 'trigger') {
+      and.push({
+        $or: [{ initiatedBy: 'trigger' }, { triggeredByRuleId: { $ne: null } }],
+      });
+    } else if (q.initiatedBy) {
+      and.push({ initiatedBy: q.initiatedBy });
+    }
+    if (q.participantAgentId) {
+      const id = new Types.ObjectId(q.participantAgentId);
+      and.push({ $or: [{ assignedAgentId: id }, { participantAgentIds: id }] });
+    }
+
+    if (q.visitorName || q.visitorEmail) {
+      const cond: FilterQuery<VisitorDocument> = { ...visitorSiteFilter };
+      if (q.visitorName) {
+        cond.nameLower = new RegExp(`^${this.escapeRegex(q.visitorName.trim().toLowerCase())}`);
+      }
+      if (q.visitorEmail) {
+        cond.emailLower = new RegExp(`^${this.escapeRegex(q.visitorEmail.trim().toLowerCase())}`);
+      }
+      const visitors = await this.visitorModel
+        .find(cond)
+        .select('_id')
+        .limit(5000)
+        .lean()
+        .exec();
+      if (visitors.length === 0) return false;
+      and.push({ visitorId: { $in: visitors.map((v) => v._id) } });
+    }
+
+    if (q.keywords) {
+      // Word-based (text index on messages.body). Capped so a very common
+      // word can't build an unbounded id list.
+      const hits = await this.messageModel
+        .aggregate<{ _id: Types.ObjectId }>([
+          { $match: { $text: { $search: q.keywords } } },
+          { $group: { _id: '$conversationId' } },
+          { $limit: 10000 },
+        ])
+        .exec();
+      if (hits.length === 0) return false;
+      and.push({ _id: { $in: hits.map((h) => h._id) } });
+    }
+
+    if (and.length > 0) filter.$and = [...(filter.$and ?? []), ...and];
+    return true;
+  }
+
   async assign(
     actor: AuthenticatedUser,
     siteId: string,
@@ -1110,7 +1410,7 @@ export class ConversationsService {
     // (the atomic compare-and-swap below) and the real-time broadcast are
     // byte-identical either way, per the guardrail to reuse this exact
     // mechanism rather than build a second one.
-    autoClaimTrigger?: 'open' | 'reply',
+    autoClaimTrigger?: 'open' | 'reply' | 'takeover',
   ): Promise<ConversationDocument> {
     const site = await this.assertSite(actor, siteId);
     const conversation = await this.findConversationOnSite(
@@ -1190,9 +1490,12 @@ export class ConversationsService {
     await this.auditLog.record({
       actorType: 'user',
       actorId: actor.userId,
-      action: autoClaimTrigger
-        ? 'conversation.auto_claimed'
-        : 'conversation.assigned',
+      action:
+        autoClaimTrigger === 'takeover'
+          ? 'conversation.taken_over'
+          : autoClaimTrigger
+            ? 'conversation.auto_claimed'
+            : 'conversation.assigned',
       siteId: site._id,
       targetType: 'Conversation',
       targetId: updated._id,
@@ -1307,6 +1610,7 @@ export class ConversationsService {
       status: 'open',
       startedAt: new Date(),
       referenceNumber,
+      initiatedBy: 'agent',
     });
 
     visitorDoc.pastChatsCount += 1;
@@ -1402,6 +1706,81 @@ export class ConversationsService {
       }
       throw err;
     }
+  }
+
+  /**
+   * Takeover-on-reply (`conversations.assign_on_reply`) — a sender who holds
+   * that permission on this Site and replies into a Conversation another
+   * Agent holds becomes its assignee, exactly as if they'd clicked "Assign to
+   * me" (reuses `assign()`'s compare-and-swap/audit/broadcast). Skipped for
+   * closed Conversations and for senders without the permission, so
+   * `assertCanSend` right after still applies unchanged to everyone else.
+   * Losing a takeover race isn't an error here — the caller proceeds against
+   * the fresh state and `assertCanSend` decides.
+   */
+  private async takeOverOnReplyIfPermitted(
+    actor: AuthenticatedUser,
+    siteId: string,
+    conversation: ConversationDocument,
+  ): Promise<ConversationDocument> {
+    const previousAgentId = conversation.assignedAgentId?.toString() ?? null;
+    if (
+      !previousAgentId ||
+      previousAgentId === actor.userId ||
+      conversation.status === 'closed'
+    ) {
+      return conversation;
+    }
+    const allowed = await this.permissionsService.hasPermission(
+      actor.userId,
+      'conversations.assign_on_reply',
+      siteId,
+    );
+    if (!allowed) return conversation;
+
+    let updated: ConversationDocument;
+    try {
+      updated = await this.assign(
+        actor,
+        siteId,
+        conversation._id.toString(),
+        actor.userId,
+        previousAgentId,
+        'takeover',
+      );
+    } catch (err) {
+      if (err instanceof ConflictException) {
+        const fresh = await this.conversationModel
+          .findOne({ _id: conversation._id, siteId: conversation.siteId })
+          .exec();
+        if (fresh) return fresh;
+      }
+      throw err;
+    }
+
+    // Internal system line — Agents/Admins only; the Visitor never sees it.
+    const users = await this.userModel
+      .find({ _id: { $in: [actor.userId, previousAgentId] } }, 'displayName')
+      .lean()
+      .exec();
+    const nameOf = (id: string) =>
+      users.find((u) => u._id.toString() === id)?.displayName ?? 'An agent';
+    const notice = await this.messageModel.create({
+      conversationId: updated._id,
+      senderType: 'system',
+      senderId: null,
+      agentOnly: true,
+      body: `${nameOf(actor.userId)} took over this chat from ${nameOf(previousAgentId)}.`,
+      sentAt: new Date(),
+    });
+    this.emitMessageCreated(
+      updated.siteId.toString(),
+      notice,
+      updated.referenceNumber,
+      undefined,
+      updated.visitorId.toString(),
+    );
+    return updated;
   }
 
   /**
@@ -1551,6 +1930,11 @@ export class ConversationsService {
         'reply',
       );
     }
+    conversation = await this.takeOverOnReplyIfPermitted(
+      actor,
+      siteId,
+      conversation,
+    );
     // Requirement 3 — once assigned, only the assignee may send. Enforced
     // here, at the service layer, so it holds regardless of transport
     // (REST or the WebSocket `agent:send_message`/`agent:send_proactive_message`
@@ -1587,6 +1971,11 @@ export class ConversationsService {
       deliveredAt,
       readAt,
     });
+    await this.trackMessage(
+      conversation._id,
+      'agent',
+      new Types.ObjectId(actor.userId),
+    );
 
     this.emitMessageCreated(
       conversation.siteId.toString(),
@@ -1671,6 +2060,11 @@ export class ConversationsService {
         'reply',
       );
     }
+    conversation = await this.takeOverOnReplyIfPermitted(
+      actor,
+      siteId,
+      conversation,
+    );
     await this.assertCanSend(actor, conversation);
 
     const { deliveredAt, readAt } = this.computeInitialTickState(conversation);
@@ -1683,6 +2077,11 @@ export class ConversationsService {
       deliveredAt,
       readAt,
     });
+    await this.trackMessage(
+      conversation._id,
+      'agent',
+      new Types.ObjectId(actor.userId),
+    );
 
     this.emitMessageCreated(
       conversation.siteId.toString(),
@@ -1804,6 +2203,7 @@ export class ConversationsService {
       status: 'open',
       startedAt: new Date(),
       referenceNumber,
+      initiatedBy: 'agent',
     });
 
     // Same FR-VIS-05/FR-VIS-08 bookkeeping create() does for a
@@ -1916,6 +2316,7 @@ export class ConversationsService {
       attachments: resolvedAttachments,
       sentAt: new Date(),
     });
+    await this.trackMessage(conversation._id, 'visitor', null);
 
     this.emitMessageCreated(
       conversation.siteId.toString(),
@@ -1976,6 +2377,7 @@ export class ConversationsService {
     message: MessageDocument,
     referenceNumber: string,
     visitorName?: string | null,
+    agentOnlyVisitorId?: string,
   ): void {
     this.realtimeEvents.emit({
       kind: 'message.created',
@@ -1984,6 +2386,7 @@ export class ConversationsService {
       message: this.toRealtimeMessagePayload(message),
       referenceNumber,
       visitorName,
+      agentOnlyVisitorId,
     });
   }
 
@@ -2146,7 +2549,7 @@ export class ConversationsService {
       );
     }
     const messages = await this.messageModel
-      .find({ conversationId: conversation._id })
+      .find({ conversationId: conversation._id, agentOnly: { $ne: true } })
       .sort({ sentAt: 1 })
       .exec();
     // Phase 2 §3.10 (FR-P2-READ-04) — this is the Widget's (re)join, the
@@ -2201,15 +2604,17 @@ export class ConversationsService {
       );
     }
     return this.toMessageWireList(
-      await this.queryMessagesSince(conversation._id, since),
+      await this.queryMessagesSince(conversation._id, since, true),
     );
   }
 
   private async queryMessagesSince(
     conversationId: Types.ObjectId,
     since: GetMessagesSinceQueryDto,
+    forVisitor = false,
   ): Promise<MessageDocument[]> {
     const filter: FilterQuery<MessageDocument> = { conversationId };
+    if (forVisitor) filter.agentOnly = { $ne: true };
 
     let sentAfter: Date | undefined;
     if (since.sinceMessageId) {

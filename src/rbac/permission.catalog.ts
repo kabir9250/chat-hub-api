@@ -184,6 +184,12 @@ export const PERMISSION_CATALOG: readonly PermissionDefinition[] = [
     description: 'Assign/reassign a conversation to an Agent',
   },
   {
+    key: 'conversations.assign_on_reply',
+    module: 'Conversations',
+    description:
+      "Take over an open conversation by simply replying in it (auto-assigns it to the sender, even if another Agent holds it). Also grant 'conversations.view_site'",
+  },
+  {
     key: 'conversations.close',
     module: 'Conversations',
     description: "Change a conversation's status",
@@ -192,6 +198,20 @@ export const PERMISSION_CATALOG: readonly PermissionDefinition[] = [
     key: 'conversations.tag',
     module: 'Conversations',
     description: 'Add/remove tags',
+  },
+  {
+    key: 'history.basic_filter',
+    module: 'Conversations',
+    description:
+      'Use the basic History filter (date range, status, rating, agent, tag)',
+  },
+  {
+    key: 'history.advanced_filter',
+    module: 'Conversations',
+    description:
+      'Use the advanced History filter panel (keywords, chats served, ' +
+      'satisfaction, initiated-by, agent/visitor pickers, and more) in the ' +
+      'Admin Panel',
   },
   {
     key: 'visitors.view',
@@ -332,10 +352,17 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<
   // its own in this catalog), so Manager/Supervisor/Agent below deliberately
   // do NOT list `shortcuts.view_all` — confirm with the business before
   // extending it to Manager by default.
-  Owner: [...ALL_PERMISSION_KEYS],
+  //
+  // EXCEPT `conversations.assign_on_reply` (take over a chat just by
+  // replying): business decision — no Role, Owner included, holds it by
+  // default; an Owner grants it per-Role (or to their own Role) explicitly
+  // from the Roles screen.
+  Owner: ALL_PERMISSION_KEYS.filter((k) => k !== 'conversations.assign_on_reply'),
   Manager: [
     'analytics.view_organization',
     'conversations.view_site',
+    'history.basic_filter',
+    'history.advanced_filter',
     'users.view',
     'visitors.ban',
     // 'visitors.ban' added this session per explicit user instruction to
@@ -395,6 +422,8 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<
     'conversations.assign',
     'conversations.close',
     'conversations.tag',
+    'history.basic_filter',
+    'history.advanced_filter',
     'visitors.view',
     'visitors.edit',
     'visitors.ban',
@@ -411,6 +440,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<
     'conversations.view_own',
     'conversations.close',
     'conversations.tag',
+    'history.basic_filter',
     'visitors.view',
     'visitors.edit',
     'visitors.ban',

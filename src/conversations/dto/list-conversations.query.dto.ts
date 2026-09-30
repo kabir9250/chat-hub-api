@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsDateString,
   IsIn,
   IsInt,
@@ -13,10 +14,12 @@ import {
 } from 'class-validator';
 
 import {
+  CONVERSATION_INITIATORS,
   CONVERSATION_STATUSES,
   CONVERSATION_SUBMISSION_CHANNELS,
 } from '../../database/schemas/conversation.schema';
 import type {
+  ConversationInitiator,
   ConversationStatus,
   ConversationSubmissionChannel,
 } from '../../database/schemas/conversation.schema';
@@ -129,6 +132,83 @@ export class ListConversationsQueryDto {
   @IsString()
   @MaxLength(200)
   search?: string;
+
+  // ---- Advanced History filter (requires `history.advanced_filter`) ------
+
+  @ApiPropertyOptional({ description: 'Only chats with an unread Visitor message.' })
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true')
+  @IsBoolean()
+  unread?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Word-based search over message bodies (text index).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  keywords?: string;
+
+  @ApiPropertyOptional({ description: 'Minimum Visitor+Agent message count.' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  messagesAtLeast?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Comma-separated "Chats served" buckets: completed,dropped,missed,' +
+      'unresponsive,offline_form.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  served?: string;
+
+  @ApiPropertyOptional({ enum: ['good', 'bad'] })
+  @IsOptional()
+  @IsIn(['good', 'bad'])
+  satisfaction?: 'good' | 'bad';
+
+  @ApiPropertyOptional({ description: 'Comma-separated tags; matches any.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  tagsAny?: string;
+
+  @ApiPropertyOptional({ description: 'Only chats started by a Trigger.' })
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true')
+  @IsBoolean()
+  triggered?: boolean;
+
+  @ApiPropertyOptional({ enum: CONVERSATION_INITIATORS })
+  @IsOptional()
+  @IsIn(CONVERSATION_INITIATORS)
+  initiatedBy?: ConversationInitiator;
+
+  @ApiPropertyOptional({ description: 'Visitor name, prefix match.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  visitorName?: string;
+
+  @ApiPropertyOptional({ description: 'Visitor email, prefix match.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  visitorEmail?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Any chat this Agent was assigned to OR sent a message in (unlike ' +
+      '`agentId`, which is the current assignee only).',
+  })
+  @IsOptional()
+  @IsMongoId()
+  participantAgentId?: string;
 
   @ApiPropertyOptional({ default: 1, minimum: 1 })
   @IsOptional()

@@ -8,6 +8,21 @@ export const CONVERSATION_SUBMISSION_CHANNELS = ['online', 'offline'] as const;
 export type ConversationSubmissionChannel =
   (typeof CONVERSATION_SUBMISSION_CHANNELS)[number];
 
+export const CONVERSATION_INITIATORS = ['visitor', 'agent', 'trigger'] as const;
+export type ConversationInitiator = (typeof CONVERSATION_INITIATORS)[number];
+
+export const SERVED_OUTCOMES = [
+  'completed',
+  'dropped',
+  'missed',
+  'unresponsive',
+  'offline_form',
+] as const;
+export type ServedOutcome = (typeof SERVED_OUTCOMES)[number];
+
+export const DROP_SIDES = ['visitor', 'agent'] as const;
+export type DropSide = (typeof DROP_SIDES)[number];
+
 /**
  * Conversation — SRS §4.5. Site-scoped. Messages are deliberately NOT
  * embedded here (see message.schema.ts) — only the transcript's own
@@ -127,6 +142,59 @@ export class Conversation {
    */
   @Prop({ type: Boolean, default: false })
   deptQueueVisible!: boolean;
+
+  // ---- Advanced History filter fields (denormalized; maintained by
+  // ConversationsService.trackMessage/refreshServedOutcome + the gateway's
+  // disconnect tracking, backfilled by migrate-backfill-conversation-history-
+  // fields). Human/system-authored messages only count toward the counters
+  // below where noted — `system` messages are never counted.
+
+  /** Visitor + agent messages (system excluded). */
+  @Prop({ type: Number, default: 0 })
+  messageCount!: number;
+
+  @Prop({ type: Number, default: 0 })
+  visitorMsgCount!: number;
+
+  @Prop({ type: Number, default: 0 })
+  agentMsgCount!: number;
+
+  /** Who started the chat: the Visitor, an Agent (proactive), or a Trigger. */
+  @Prop({
+    type: String,
+    enum: CONVERSATION_INITIATORS,
+    default: 'visitor',
+  })
+  initiatedBy!: ConversationInitiator;
+
+  /** True once a visitor message arrives; false once any Agent opens/replies. */
+  @Prop({ type: Boolean, default: false })
+  unreadByAgent!: boolean;
+
+  /** Every Agent who has sent a message in this chat (plus the assignee). */
+  @Prop({ type: [SchemaTypes.ObjectId], default: [] })
+  participantAgentIds!: Types.ObjectId[];
+
+  /** "Chats served" bucket — see served-outcome.util.ts. null = in progress. */
+  @Prop({ type: String, enum: SERVED_OUTCOMES, default: null })
+  servedOutcome!: ServedOutcome | null;
+
+  /**
+   * Drop tracking: set when one side's socket goes fully offline while the
+   * chat is open/pending; cleared if that side reconnects. Once it has been
+   * set for longer than DROP_GRACE_MS the chat is marked dropped (droppedAt).
+   */
+  @Prop({ type: Date, default: null })
+  disconnectedAt!: Date | null;
+
+  @Prop({ type: String, enum: [...DROP_SIDES, null], default: null })
+  disconnectedSide!: DropSide | null;
+
+  @Prop({ type: Date, default: null })
+  droppedAt!: Date | null;
+
+  @Prop({ type: String, enum: [...DROP_SIDES, null], default: null })
+  droppedBy!: DropSide | null;
 }
 
 export type ConversationDocument = Conversation & Document;
@@ -142,3 +210,14 @@ ConversationSchema.index({ assignedAgentId: 1 });
 // lets that become a true index-ordered top-N scan instead. See
 // `files/reports/T-11-load.md` Test 4 finding #3.
 ConversationSchema.index({ siteId: 1, startedAt: -1 });
+// Advanced History filter — servedOutcome/channel/agent-participation
+// lookups, all sorted by startedAt like the base list.
+ConversationSchema.index({ siteId: 1, servedOutcome: 1, startedAt: -1 });
+ConversationSchema.index({ siteId: 1, submissionChannel: 1, startedAt: -1 });
+ConversationSchema.index({ participantAgentIds: 1, startedAt: -1 });
+ConversationSchema.index({ siteId: 1, tags: 1 });
+// Drop sweep: only conversations with a pending disconnect.
+ConversationSchema.index(
+  { disconnectedAt: 1 },
+  { partialFilterExpression: { disconnectedAt: { $type: 'date' } } },
+);

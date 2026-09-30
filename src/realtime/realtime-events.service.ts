@@ -106,6 +106,9 @@ export type RealtimeDomainEvent =
       // `data.senderType === 'visitor'` nudges in the first place).
       referenceNumber: string;
       visitorName?: string | null;
+      // Set for internal system lines: the gateway keeps them off this
+      // Visitor's socket(s) and skips the Site-wide "new message" nudge.
+      agentOnlyVisitorId?: string;
     }
   | {
       // Phase 2 §3.10 (FR-P2-READ-02–06) — a previously-created message's

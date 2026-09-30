@@ -97,32 +97,25 @@ describe('T-01 TC-01.3 — WebSocket authorization', () => {
     const address = app.getHttpServer().address();
     baseUrl = `http://127.0.0.1:${address.port}`;
 
-    // Find (or create) a Site A Conversation assigned specifically to
-    // agent-a1 (not agent-a2) — the seed data cycles assignment across the
-    // Site A agent pool, so query for one deterministically via Owner.
+    // A Site A Conversation held by agent-a1 that agent-a2 has NO route to.
+    // It must NOT be a visitor-started chat: those are broadcast to the whole
+    // Department's queue (`deptQueueVisible`, Agent-lock-fix) and stay readable
+    // to every same-Department view_own Agent even after being claimed —
+    // intended behavior, not what this case tests. Owner hands a fresh
+    // Visitor straight to agent-a1 instead (assign-visitor creates the
+    // Conversation already assigned and never queue-visible).
     const siteAId = siteId('Site A');
-    const list = await request(app.getHttpServer())
-      .get(
-        `/sites/${siteAId}/conversations?agentId=${userIdFor('agent-a1@test.local')}&limit=1`,
-      )
-      .set(...authHeader('owner@test.local'));
-    if (list.body.items?.length > 0) {
-      siteAConvAssignedToA1 = list.body.items[0]._id ?? list.body.items[0].id;
-    } else {
-      // Fallback: create one and assign it.
-      const initRes = await request(app.getHttpServer())
-        .post('/visitor-session/init')
-        .send({ siteId: siteAId, pageUrl: 'https://sitea.test.local/' });
-      const convRes = await request(app.getHttpServer())
-        .post(`/sites/${siteAId}/conversations`)
-        .set('Authorization', `Bearer ${initRes.body.token}`)
-        .send({ initialMessage: 'ws test fixture' });
-      siteAConvAssignedToA1 = convRes.body._id ?? convRes.body.id;
-      await request(app.getHttpServer())
-        .patch(`/sites/${siteAId}/conversations/${siteAConvAssignedToA1}/assign`)
-        .set(...authHeader('owner@test.local'))
-        .send({ agentId: userIdFor('agent-a1@test.local') });
-    }
+    const initRes = await request(app.getHttpServer())
+      .post('/visitor-session/init')
+      .send({ siteId: siteAId, pageUrl: 'https://sitea.test.local/' });
+    const assignRes = await request(app.getHttpServer())
+      .post(`/sites/${siteAId}/conversations/assign-visitor`)
+      .set(...authHeader('owner@test.local'))
+      .send({
+        visitorId: initRes.body.visitorId,
+        agentId: userIdFor('agent-a1@test.local'),
+      });
+    siteAConvAssignedToA1 = assignRes.body._id ?? assignRes.body.id;
   });
 
   afterAll(async () => {

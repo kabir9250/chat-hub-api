@@ -301,6 +301,13 @@ export class RealtimeGateway
           break;
 
         case 'message.created':
+          if (event.agentOnlyVisitorId) {
+            this.server
+              .to(conversationRoom(event.conversationId))
+              .except(visitorRoom(event.agentOnlyVisitorId))
+              .emit('message:new', event.message);
+            break;
+          }
           this.server
             .to(conversationRoom(event.conversationId))
             .emit('message:new', event.message);
@@ -511,6 +518,11 @@ export class RealtimeGateway
       // than a second `setInterval`. 30s resolution is more than tight
       // enough for a "business hours just opened/closed" chime.
       void this.sweepBusinessHoursBoundaries();
+      void this.conversationsService
+        .sweepDroppedConversations()
+        .catch((err: Error) =>
+          this.logger.warn(`Dropped-chat sweep failed: ${err.message}`),
+        );
     }, RealtimeGateway.STALE_SWEEP_INTERVAL_MS);
   }
 
@@ -540,6 +552,9 @@ export class RealtimeGateway
       // fired `disconnect`) so a later stray event from it can't resurrect
       // presence for an id we just declared offline.
       this.server.in(visitorRoom(visitorId)).disconnectSockets(true);
+      void this.conversationsService
+        .markSideDisconnected('visitor', visitorId)
+        .catch(() => undefined);
       this.server.to(siteAlertRoom(result.siteId)).emit('visitor.offline', {
         siteId: result.siteId,
         visitorId,
@@ -653,6 +668,9 @@ export class RealtimeGateway
       // already uses (auto-joined by connectAsUser above for any User
       // holding conversations.view_site).
       if (wentOnline) {
+        void this.conversationsService
+          .clearSideDisconnected('visitor', visitor.visitorId)
+          .catch(() => undefined);
         // Perf fix (direct user feedback — the live Visitors table was slow
         // to show a new arrival despite this being a real-time socket
         // broadcast). The delay was never this event — it fired the instant
@@ -726,6 +744,9 @@ export class RealtimeGateway
       authUser.userId,
       client.id,
     );
+    void this.conversationsService
+      .clearSideDisconnected('agent', authUser.userId)
+      .catch(() => undefined);
 
     // Requirement 2: auto-join the Site's broadcast room for every Site
     // where this User holds conversations.view_site (view_own alone does
@@ -773,6 +794,11 @@ export class RealtimeGateway
         data.user.userId,
         client.id,
       );
+      if (status === 'offline') {
+        void this.conversationsService
+          .markSideDisconnected('agent', data.user.userId)
+          .catch(() => undefined);
+      }
       if (status) {
         const summary =
           await this.permissionsService.getEffectivePermissionsSummary(
@@ -791,6 +817,9 @@ export class RealtimeGateway
         client.id,
       );
       if (result?.wentOffline) {
+        void this.conversationsService
+          .markSideDisconnected('visitor', data.visitor.visitorId)
+          .catch(() => undefined);
         // Same `siteAlertRoom` retarget as the `visitor.online` emit above
         // — keep the pair symmetric.
         this.server.to(siteAlertRoom(result.siteId)).emit('visitor.offline', {
